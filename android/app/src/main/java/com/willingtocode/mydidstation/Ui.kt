@@ -1,6 +1,7 @@
 package com.willingtocode.mydidstation
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Box
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -166,6 +168,7 @@ fun DidListScreen(container: Container, onOpen: (String) -> Unit, onSettings: ()
                 items(rows, key = { it.did }) { row ->
                     Row(
                         modifier = Modifier.fillMaxWidth()
+                            .clickable { onOpen(row.did) }
                             .padding(horizontal = 16.dp, vertical = 14.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
@@ -183,7 +186,6 @@ fun DidListScreen(container: Container, onOpen: (String) -> Unit, onSettings: ()
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
-                    TextButton(onClick = { onOpen(row.did) }) { Text("Open") }
                     HorizontalDivider()
                 }
                 status?.let { message ->
@@ -266,6 +268,7 @@ fun ConversationsScreen(
                 items(rows, key = { it.id }) { row ->
                     Column(
                         modifier = Modifier.fillMaxWidth()
+                            .clickable { onOpen(row.id, row.contact) }
                             .padding(horizontal = 16.dp, vertical = 12.dp),
                     ) {
                         Row(
@@ -289,7 +292,6 @@ fun ConversationsScreen(
                             )
                         }
                     }
-                    TextButton(onClick = { onOpen(row.id, row.contact) }) { Text("Open") }
                     HorizontalDivider()
                 }
                 status?.let { item { Text(it, modifier = Modifier.padding(16.dp)) } }
@@ -323,12 +325,21 @@ fun MessagesScreen(
     var sending by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var refreshing by remember { mutableStateOf(false) }
+    val listState = rememberLazyListState()
 
     suspend fun reload() {
         messages = if (resolvedId == 0L) emptyList() else withContext(Dispatchers.IO) {
             container.store.markConversationRead(resolvedId)
             container.store.messages(resolvedId)
         }
+    }
+
+    // A thread opens at its newest message. Keyed on the newest id rather than
+    // on the list size, so rows that land above the fold never pull the view
+    // away from where you are reading.
+    val newestId = messages.lastOrNull()?.id
+    LaunchedEffect(newestId) {
+        if (newestId != null) listState.scrollToItem(messages.lastIndex)
     }
 
     // Typing a number that already has history should reveal it, not wait for send.
@@ -417,6 +428,7 @@ fun MessagesScreen(
             ) {
                 LazyColumn(
                     Modifier.fillMaxSize().padding(horizontal = 12.dp),
+                    state = listState,
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     items(messages, key = { it.id }) { message ->
