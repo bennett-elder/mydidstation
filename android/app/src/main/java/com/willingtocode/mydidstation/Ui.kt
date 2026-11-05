@@ -535,7 +535,12 @@ fun MessagesScreen(
                                         )
                                     }
                                     val status = message.carrierStatus.trim().takeIf {
-                                        it.isNotEmpty() &&
+                                        // Only sent messages have a meaningful status. The
+                                        // vendor doc only ever attaches the field to type 0,
+                                        // and on a received message "undelivered" reads as a
+                                        // lie about a message you are looking at.
+                                        !message.incoming &&
+                                            it.isNotEmpty() &&
                                             !it.equals("Information not available", ignoreCase = true)
                                     }
                                     Text(
