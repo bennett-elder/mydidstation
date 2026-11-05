@@ -22,6 +22,8 @@ app/src/main/java/com/willingtocode/mydidstation/
   Settings.kt     EncryptedSharedPreferences with a Keystore-backed key
   Ui.kt           theme, nav, all four screens
 app/src/test/java/.../SmsTest.kt   8 tests for the segmentation math
+app/src/main/res/mipmap-*/  launcher icon: adaptive XML plus legacy PNGs
+art/ic_launcher.py          renders those PNGs; the icon source, not a build step
 ```
 
 ## Build and install
@@ -32,6 +34,18 @@ cd ~/mydidstation/android
 ./gradlew :app:testDebugUnitTest      # segmentation tests
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
+
+## Icon
+
+`art/ic_launcher.py` is the source for every launcher PNG. It is not part of the
+build. The committed PNGs are what Gradle packs.
+
+```bash
+python3 android/art/ic_launcher.py    # rewrites android/app/src/main/res/mipmap-*
+```
+
+The beams, the palette and the scrim are constants at the top of that file. It
+needs Pillow and a heavy sans font, and it prints the face it found.
 
 ## Build facts that cost time to discover
 

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The adaptive icon background is only visible under the mask edge, since
+         the foreground bitmap covers the whole 108dp canvas. -->
+    <color name="ic_launcher_background">#2B3450</color>
+</resources>
