@@ -43,6 +43,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -533,9 +534,27 @@ fun MessagesScreen(
                                             style = MaterialTheme.typography.labelSmall,
                                         )
                                     }
+                                    val status = message.carrierStatus.trim().takeIf {
+                                        it.isNotEmpty() &&
+                                            !it.equals("Information not available", ignoreCase = true)
+                                    }
                                     Text(
-                                        if (message.pending) "Sending…" else shortDate(message.sentAt),
+                                        buildString {
+                                            append(
+                                                if (message.pending) "Sending…"
+                                                else shortDate(message.sentAt)
+                                            )
+                                            if (status != null) append("  ·  ").append(status)
+                                        },
                                         style = MaterialTheme.typography.labelSmall,
+                                        color = if (status != null &&
+                                            (status.contains("undeliver", true) ||
+                                                status.contains("fail", true))
+                                        ) {
+                                            MaterialTheme.colorScheme.error
+                                        } else {
+                                            Color.Unspecified
+                                        },
                                     )
                                 }
                             }

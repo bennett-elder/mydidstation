@@ -97,6 +97,7 @@ class Sync(private val store: Store, private val api: VoipMs) {
                 media = message.media,
                 sentAt = message.sentAt,
                 unread = unread && message.incoming,
+                carrierStatus = message.carrierStatus,
             )
             if (isNew) added++
         }

@@ -31,6 +31,7 @@ data class MsgRow(
     val sentAt: Long,
     val unread: Boolean,
     val pending: Boolean,
+    val carrierStatus: String,
 )
 
 /**
@@ -79,6 +80,7 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
                  sent_at INTEGER NOT NULL,
                  unread INTEGER NOT NULL DEFAULT 0,
                  pending INTEGER NOT NULL DEFAULT 0,
+                 carrier_status TEXT NOT NULL DEFAULT '',
                  UNIQUE(did, remote_id)
                )"""
         )
@@ -100,6 +102,12 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
             // v3 shows an outgoing message the moment you send it, so a row needs
             // to be able to say "not confirmed by the API yet".
             db.execSQL("ALTER TABLE message ADD COLUMN pending INTEGER NOT NULL DEFAULT 0")
+        }
+        if (oldVersion < 4) {
+            // v4 keeps what the carrier says about the last leg. The poll already
+            // fetches it; ignoring it meant a message marked undelivered looked
+            // exactly like a delivered one.
+            db.execSQL("ALTER TABLE message ADD COLUMN carrier_status TEXT NOT NULL DEFAULT ''")
         }
     }
 
@@ -204,7 +212,10 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
         return db.insert("conversation", null, values)
     }
 
-    /** Insert one API message. Returns true if it was new (dedupe via UNIQUE). */
+    /**
+     * Insert one API message, or refresh its carrier status if we already have it.
+     * Returns true if the row was new (dedupe via UNIQUE(did, remote_id)).
+     */
     fun upsertRemote(
         did: String,
         contact: String,
@@ -214,6 +225,7 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
         media: List<String>,
         sentAt: Long,
         unread: Boolean,
+        carrierStatus: String,
     ): Boolean = synchronized(lock) {
         val db = writableDatabase
         db.beginTransaction()
@@ -231,10 +243,21 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
                 put("media3", media.getOrNull(2) ?: "")
                 put("sent_at", sentAt)
                 put("unread", if (unread) 1 else 0)
+                put("carrier_status", carrierStatus)
             }
             val row = db.insertWithOnConflict(
                 "message", null, values, SQLiteDatabase.CONFLICT_IGNORE,
             )
+            if (row == -1L && remoteId != null) {
+                // The row exists, but the status moves over time: queued becomes
+                // undelivered or delivered. Refresh only that column, so a repeat
+                // poll cannot undo anything else, such as a read flag.
+                val patch = ContentValues().apply { put("carrier_status", carrierStatus) }
+                db.update(
+                    "message", patch, "did = ? AND remote_id = ?",
+                    arrayOf(did, remoteId.toString()),
+                )
+            }
             db.setTransactionSuccessful()
             row != -1L
         } finally {
@@ -275,7 +298,7 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
     fun messages(conversationId: Long): List<MsgRow> = synchronized(lock) {
         val out = mutableListOf<MsgRow>()
         readableDatabase.rawQuery(
-            """SELECT id, incoming, body, media1, media2, media3, sent_at, unread, pending
+            """SELECT id, incoming, body, media1, media2, media3, sent_at, unread, pending, carrier_status
                  FROM message WHERE conversation_id = ? ORDER BY sent_at ASC, id ASC""",
             arrayOf(conversationId.toString()),
         ).use { c ->
@@ -290,6 +313,7 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
                         sentAt = c.getLong(6),
                         unread = c.getInt(7) == 1,
                         pending = c.getInt(8) == 1,
+                        carrierStatus = c.getString(9),
                     )
                 )
             }
@@ -355,6 +379,6 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
 
     private companion object {
         const val NAME = "mydidstation.db"
-        const val VERSION = 3
+        const val VERSION = 4
     }
 }

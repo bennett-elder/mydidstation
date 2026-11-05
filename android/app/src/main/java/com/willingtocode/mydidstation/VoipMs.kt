@@ -22,6 +22,7 @@ data class RemoteMsg(
     val body: String,
     val media: List<String>,
     val sentAt: Long,
+    val carrierStatus: String,
 )
 
 /**
@@ -112,6 +113,7 @@ class VoipMs(private val settings: Settings) {
                     body = row.optString("message"),
                     media = media,
                     sentAt = sentAt,
+                    carrierStatus = row.optString("carrier_status"),
                 )
             )
         }
