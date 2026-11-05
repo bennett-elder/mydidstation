@@ -19,7 +19,7 @@ app/src/main/java/com/willingtocode/mydidstation/
   Sync.kt         polling engine: per-DID cursor, 24 h overlap, upsert
   SyncWorker.kt   WorkManager, every 15 minutes
   Sms.kt          GSM-7 and UCS-2 segmentation with word-safe split points
-  Settings.kt     EncryptedSharedPreferences with a Keystore master key
+  Settings.kt     EncryptedSharedPreferences with a Keystore-backed key
   Ui.kt           theme, nav, all four screens
 app/src/test/java/.../SmsTest.kt   8 tests for the segmentation math
 ```

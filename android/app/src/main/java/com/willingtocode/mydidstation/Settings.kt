@@ -4,7 +4,7 @@ import android.content.Context
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
-/** API credentials, encrypted at rest with a Keystore-backed master key. */
+/** API credentials, encrypted at rest with a Keystore-backed key. */
 class Settings(context: Context) {
 
     private val prefs = EncryptedSharedPreferences.create(
