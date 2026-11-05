@@ -138,10 +138,31 @@ class Sync(private val store: Store, private val api: VoipMs) {
         added
     }
 
-    suspend fun send(did: String, contact: String, body: String) = withContext(Dispatchers.IO) {
-        api.sendSms(did, contact, body)
-        refreshDid(did)
-    }
+    /**
+     * Delivers a message the UI has already shown as pending. The API returns the
+     * new id, which becomes that row's remote_id, so the next poll dedupes onto it
+     * instead of inserting a second copy. A failure removes the pending row and
+     * rethrows, so the thread never keeps a message that was never sent.
+     */
+    suspend fun deliver(did: String, contact: String, body: String, pendingId: Long) =
+        withContext(Dispatchers.IO) {
+            try {
+                val remoteId = api.sendSms(did, contact, body)
+                if (remoteId != null) {
+                    store.confirmPending(pendingId, remoteId)
+                } else {
+                    // No id came back, so this row cannot be matched to the real
+                    // message. Drop it and let the next poll bring that one in.
+                    store.deleteMessage(pendingId)
+                }
+                refreshDid(did)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                store.deleteMessage(pendingId)
+                throw e
+            }
+        }
 
     private companion object {
         const val DAY_SECONDS = 24L * 60 * 60

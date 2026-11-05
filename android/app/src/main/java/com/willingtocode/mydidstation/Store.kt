@@ -30,6 +30,7 @@ data class MsgRow(
     val media: List<String>,
     val sentAt: Long,
     val unread: Boolean,
+    val pending: Boolean,
 )
 
 /**
@@ -77,6 +78,7 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
                  media3 TEXT NOT NULL DEFAULT '',
                  sent_at INTEGER NOT NULL,
                  unread INTEGER NOT NULL DEFAULT 0,
+                 pending INTEGER NOT NULL DEFAULT 0,
                  UNIQUE(did, remote_id)
                )"""
         )
@@ -93,6 +95,11 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
             // to remember how far back it has been filled. Zero means "not known
             // yet", and the first look-back treats that as the initial window.
             db.execSQL("ALTER TABLE did ADD COLUMN history_start INTEGER NOT NULL DEFAULT 0")
+        }
+        if (oldVersion < 3) {
+            // v3 shows an outgoing message the moment you send it, so a row needs
+            // to be able to say "not confirmed by the API yet".
+            db.execSQL("ALTER TABLE message ADD COLUMN pending INTEGER NOT NULL DEFAULT 0")
         }
     }
 
@@ -268,7 +275,7 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
     fun messages(conversationId: Long): List<MsgRow> = synchronized(lock) {
         val out = mutableListOf<MsgRow>()
         readableDatabase.rawQuery(
-            """SELECT id, incoming, body, media1, media2, media3, sent_at, unread
+            """SELECT id, incoming, body, media1, media2, media3, sent_at, unread, pending
                  FROM message WHERE conversation_id = ? ORDER BY sent_at ASC, id ASC""",
             arrayOf(conversationId.toString()),
         ).use { c ->
@@ -282,6 +289,7 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
                             .filter { it.isNotEmpty() },
                         sentAt = c.getLong(6),
                         unread = c.getInt(7) == 1,
+                        pending = c.getInt(8) == 1,
                     )
                 )
             }
@@ -296,8 +304,57 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
         )
     }
 
+    /**
+     * An outgoing message, stored before the API has seen it, so the thread can
+     * show it immediately. Returns the row id to confirm or delete later.
+     */
+    fun insertPending(did: String, contact: String, body: String, sentAt: Long): Long =
+        synchronized(lock) {
+            val db = writableDatabase
+            db.beginTransaction()
+            try {
+                val convId = ensureConversation(db, did, contact)
+                val values = ContentValues().apply {
+                    put("conversation_id", convId)
+                    put("did", did)
+                    put("contact", contact)
+                    put("incoming", 0)
+                    put("body", body)
+                    put("sent_at", sentAt)
+                    put("unread", 0)
+                    put("pending", 1)
+                }
+                val id = db.insert("message", null, values)
+                db.setTransactionSuccessful()
+                id
+            } finally {
+                db.endTransaction()
+            }
+        }
+
+    /**
+     * The API accepted the message and returned its id. Writing that id means the
+     * next poll's upsert collides with this row instead of adding a second copy.
+     */
+    fun confirmPending(id: Long, remoteId: Long) = synchronized(lock) {
+        val values = ContentValues().apply {
+            put("remote_id", remoteId)
+            put("pending", 0)
+        }
+        writableDatabase.update("message", values, "id = ?", arrayOf(id.toString()))
+    }
+
+    fun deleteMessage(id: Long) = synchronized(lock) {
+        writableDatabase.delete("message", "id = ?", arrayOf(id.toString()))
+    }
+
+    /** A send that never finished should not sit there saying it is sending. */
+    fun dropStalePending(olderThan: Long) = synchronized(lock) {
+        writableDatabase.delete("message", "pending = 1 AND sent_at < ?", arrayOf(olderThan.toString()))
+    }
+
     private companion object {
         const val NAME = "mydidstation.db"
-        const val VERSION = 2
+        const val VERSION = 3
     }
 }

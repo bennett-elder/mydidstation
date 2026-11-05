@@ -9,15 +9,19 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -37,6 +41,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
@@ -45,6 +52,9 @@ import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+/** A pending row older than this is assumed to have never been sent. */
+private const val STALE_PENDING_SECONDS = 15L * 60
 
 @Composable
 fun MyDidStationTheme(content: @Composable () -> Unit) {
@@ -126,9 +136,9 @@ fun DidListScreen(container: Container, onOpen: (String) -> Unit, onSettings: ()
             TopAppBar(
                 title = {
                     Column {
-                        Text("Numbers")
+                        Text("My DID Station")
                         Text(
-                            "SMS & MMS · VoIP.ms",
+                            "Numbers · VoIP.ms",
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
@@ -420,24 +430,34 @@ fun MessagesScreen(
     }
 
     val sendableContact = VoipMs.normalizePhone(to)
-    val canSend = sendableContact.length >= 7 && draft.isNotBlank() && !sending
+    val canSend = sendableContact.length >= 7 && draft.isNotBlank()
 
     fun send() {
-        if (!canSend) return
+        if (!canSend || sending) return
+        val body = draft.trim()
+        val toContact = sendableContact
         scope.launch {
             sending = true
             error = null
+            draft = ""
+            resolvedContact = toContact
+            val now = System.currentTimeMillis() / 1000
+            val pendingId = withContext(Dispatchers.IO) {
+                container.store.dropStalePending(now - STALE_PENDING_SECONDS)
+                container.store.insertPending(did, toContact, body, now)
+            }
+            resolvedId = withContext(Dispatchers.IO) {
+                container.store.ensureConversation(did, toContact)
+            }
+            // The bubble is in the thread before the request goes out.
+            reload()
             try {
-                container.sync.send(did, sendableContact, draft.trim())
-                resolvedContact = sendableContact
-                resolvedId = withContext(Dispatchers.IO) {
-                    container.store.ensureConversation(did, sendableContact)
-                }
-                draft = ""
-                reload()
+                container.sync.deliver(did, toContact, body, pendingId)
             } catch (e: Exception) {
                 error = e.message ?: "send failed"
+                draft = body
             } finally {
+                reload()
                 sending = false
             }
         }
@@ -514,7 +534,7 @@ fun MessagesScreen(
                                         )
                                     }
                                     Text(
-                                        shortDate(message.sentAt),
+                                        if (message.pending) "Sending…" else shortDate(message.sentAt),
                                         style = MaterialTheme.typography.labelSmall,
                                     )
                                 }
@@ -545,7 +565,16 @@ fun MessagesScreen(
                         modifier = Modifier.weight(1f).heightIn(min = 56.dp),
                     )
                     Button(onClick = { send() }, enabled = canSend) {
-                        Text(if (sending) "…" else "Send")
+                        if (sending) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text("Sending")
+                        } else {
+                            Text("Send")
+                        }
                     }
                 }
 
@@ -586,6 +615,13 @@ fun SettingsScreen(container: Container, onDone: () -> Unit) {
     var password by remember { mutableStateOf("") }
     var status by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
+    var found by remember { mutableStateOf<Int?>(null) }
+    val viewFocus = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+
+    // When numbers turn up, hand focus to the button that goes to see them. That
+    // also drops it from the credential fields, and the keyboard closes.
+    LaunchedEffect(found) { if (found != null) viewFocus.requestFocus() }
 
     Scaffold(
         topBar = {
@@ -628,11 +664,15 @@ fun SettingsScreen(container: Container, onDone: () -> Unit) {
                     scope.launch {
                         busy = true
                         status = null
+                        found = null
                         container.settings.save(email, password)
-                        status = try {
-                            "Found ${container.sync.discoverDids()} number(s)."
+                        try {
+                            val count = container.sync.discoverDids()
+                            found = count
+                            status = if (count == 1) "Found 1 number." else "Found $count numbers."
+                            keyboard?.hide()
                         } catch (e: Exception) {
-                            e.message ?: "could not reach VoIP.ms"
+                            status = e.message ?: "could not reach VoIP.ms"
                         }
                         busy = false
                     }
@@ -641,6 +681,14 @@ fun SettingsScreen(container: Container, onDone: () -> Unit) {
                 Text(if (busy) "Checking…" else "Save and find numbers")
             }
             status?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
+            found?.let { count ->
+                Button(
+                    onClick = onDone,
+                    modifier = Modifier.focusRequester(viewFocus),
+                ) {
+                    Text(if (count == 1) "View the number" else "View $count numbers")
+                }
+            }
         }
     }
 }
