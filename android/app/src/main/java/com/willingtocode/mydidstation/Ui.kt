@@ -237,7 +237,7 @@ fun ConversationsScreen(
         older = withContext(Dispatchers.IO) { container.sync.lookBackPlan(did) }
     }
 
-    // Opening a number enrols it and fills its last 92 days. A number you never
+    // Opening a number enrols it and pulls its first window. A number you never
     // open costs nothing, which is what keeps the first launch quick.
     LaunchedEffect(did) {
         val firstTime = withContext(Dispatchers.IO) { container.store.windowEnd(did) == 0L }

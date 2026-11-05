@@ -146,7 +146,7 @@ class Sync(private val store: Store, private val api: VoipMs) {
     private companion object {
         const val DAY_SECONDS = 24L * 60 * 60
         const val OVERLAP_SECONDS = DAY_SECONDS
-        const val INITIAL_WINDOW_SECONDS = 92L * DAY_SECONDS
+        const val INITIAL_WINDOW_SECONDS = 30L * DAY_SECONDS
         const val MAX_RANGE_SECONDS = INITIAL_WINDOW_SECONDS
         const val LOOKBACK_FLOOR_SECONDS = 2L * 365 * DAY_SECONDS
         const val PAGE_LIMIT = 100
