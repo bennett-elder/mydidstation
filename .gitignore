@@ -1,0 +1,64 @@
+# Gradle / Android
+# Layout: android/ is the Gradle root, android/app/ is the module.
+android/**/build/
+android/.gradle/
+android/**/.gradle/
+android/.kotlin/
+android/local.properties
+android/**/local.properties
+*.apk
+*.aab
+captures/
+.cxx/
+
+# Web client (planned, web/)
+node_modules/
+web/node_modules/
+web/dist/
+web/build/
+web/.next/
+web/.nuxt/
+web/.svelte-kit/
+web/.astro/
+web/out/
+web/coverage/
+web/.vite/
+web/.parcel-cache/
+*.tsbuildinfo
+
+# Not published yet: the push relay, the bench that measures it, and the
+# compiled bench binary. Held back until they are fit for consumption, so the
+# exclusion lives here rather than in .git/info/exclude, where a clone would
+# lose it. Delete a line when that part is ready to ship; relay/ and bench/
+# each carry their own .gitignore, so their build output stays covered then.
+relay/
+bench/
+bin/
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+secrets/
+# Signing material and its transports. The release keystore is decoded from a
+# base64 secret in CI, so a local copy is often named *.keystore.b64 or similar.
+*.keystore
+*.keystore.*
+*.jks
+*.p12
+keystore.properties
+signing.properties
+google-services.json
+
+# Local-only working notes — deliberately NOT published.
+# Holds the design record (DECISIONS), status, architecture lessons drawn from
+# the original app, and a converted copy of VoIP.ms's API documentation (their
+# text, not ours to redistribute). Keep a backup somewhere; git will not.
+notes/
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.log

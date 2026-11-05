@@ -1,0 +1,142 @@
+package com.willingtocode.mydidstation
+
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.MultipartBody
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONObject
+import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
+import java.util.concurrent.TimeUnit
+
+class ApiException(val status: String) : Exception("VoIP.ms returned status=$status")
+
+data class RemoteMsg(
+    val remoteId: Long,
+    val contact: String,
+    val incoming: Boolean,
+    val body: String,
+    val media: List<String>,
+    val sentAt: Long,
+)
+
+/**
+ * The one REST endpoint we talk to. Per-DID calls only: the API has no batch
+ * method and no cursor, so the sync layer owns the windowing (D8).
+ */
+class VoipMs(private val settings: Settings) {
+
+    private val http = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .build()
+
+    private val stampFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).apply {
+        timeZone = API_TZ
+    }
+    private val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
+        timeZone = API_TZ
+    }
+
+    private suspend fun call(vararg params: Pair<String, String>): JSONObject =
+        withContext(Dispatchers.IO) {
+            val creds = settings.credentials() ?: throw IllegalStateException("Not configured")
+            val form = MultipartBody.Builder().setType(MultipartBody.FORM).apply {
+                addFormDataPart("api_username", creds.first)
+                addFormDataPart("api_password", creds.second)
+                params.forEach { (k, v) -> addFormDataPart(k, v) }
+            }.build()
+            val request = Request.Builder().url(ENDPOINT).post(form).build()
+            http.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                JSONObject(response.body.string())
+            }
+        }
+
+    private fun requireSuccess(json: JSONObject) {
+        val status = json.optString("status")
+        if (status != "success") throw ApiException(status)
+    }
+
+    suspend fun discoverDids(): List<String> {
+        val json = call("method" to "getDIDsInfo")
+        requireSuccess(json)
+        val array = json.optJSONArray("dids") ?: return emptyList()
+        val out = mutableListOf<String>()
+        for (i in 0 until array.length()) {
+            val row = array.optJSONObject(i) ?: continue
+            val did = normalizePhone(row.optString("did"))
+            if (did.isNotEmpty()) out.add(did)
+        }
+        return out
+    }
+
+    /** One window, one DID: getMMS with all_messages=1 returns SMS and MMS together. */
+    suspend fun fetchMessages(did: String, fromSec: Long, toSec: Long, limit: Int): List<RemoteMsg> {
+        val json = call(
+            "method" to "getMMS",
+            "did" to did,
+            "from" to dateFormat.format(Date(fromSec * 1000)),
+            "to" to dateFormat.format(Date(toSec * 1000)),
+            "limit" to limit.toString(),
+            "all_messages" to "1",
+            "timezone" to "-5",
+        )
+        val status = json.optString("status")
+        if (status == "no_sms") return emptyList()
+        if (status == "invalid_did") return emptyList()
+        requireSuccess(json)
+
+        val array = json.optJSONArray("sms") ?: return emptyList()
+        val out = mutableListOf<RemoteMsg>()
+        for (i in 0 until array.length()) {
+            val row = array.optJSONObject(i) ?: continue
+            val remoteId = row.optString("id").toLongOrNull() ?: continue
+            val sentAt = runCatching {
+                stampFormat.parse(row.optString("date"))!!.time / 1000
+            }.getOrNull() ?: continue
+            val media = listOf(
+                row.optString("col_media1"),
+                row.optString("col_media2"),
+                row.optString("col_media3"),
+            ).filter { it.isNotEmpty() }
+            out.add(
+                RemoteMsg(
+                    remoteId = remoteId,
+                    contact = normalizePhone(row.optString("contact")),
+                    incoming = row.optString("type") == "1",
+                    body = row.optString("message"),
+                    media = media,
+                    sentAt = sentAt,
+                )
+            )
+        }
+        return out
+    }
+
+    suspend fun sendSms(did: String, destination: String, body: String): Long? {
+        val json = call(
+            "method" to "sendSMS",
+            "did" to did,
+            "dst" to destination,
+            "message" to body,
+        )
+        val status = json.optString("status")
+        if (status != "success") throw ApiException(status)
+        return json.optString("sms").toLongOrNull()
+    }
+
+    companion object {
+        private const val ENDPOINT = "https://voip.ms/api/v1/rest.php"
+        private val API_TZ: TimeZone = TimeZone.getTimeZone("America/New_York")
+
+        fun normalizePhone(raw: String): String {
+            val digits = raw.filter { it.isDigit() }
+            return if (digits.length == 11 && digits.startsWith("1")) digits.drop(1) else digits
+        }
+    }
+}

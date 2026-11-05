@@ -1,0 +1,149 @@
+name: Android
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+    inputs:
+      create_release:
+        type: boolean
+        description: 'Create or update the GitHub release with the APK'
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build and release the APK
+    runs-on: ubuntu-latest
+    concurrency:
+      group: android-release-build
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # No version is computed here. The build reads android/version.properties,
+      # so a commit always produces the same numbers, which is what F-Droid
+      # requires. Bump it locally with scripts/version.sh write and commit it.
+      # A tag must agree with that file, and this fails if it does not.
+      - name: Read version
+        id: version
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            scripts/version.sh check-tag "${GITHUB_REF_NAME}"
+            echo "PRERELEASE=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "PRERELEASE=true" >> "$GITHUB_OUTPUT"
+          fi
+          read -r name code < <(scripts/version.sh show)
+          echo "BUILD_NAME=$name" >> "$GITHUB_OUTPUT"
+          echo "BUILD_NUMBER=$code" >> "$GITHUB_OUTPUT"
+          echo "committed version: $name ($code)"
+
+      - name: Decode release keystore
+        id: keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No RELEASE_KEYSTORE_BASE64 secret, so this APK is debug-signed. Add the keystore secrets before you enter real credentials on a device."
+            exit 0
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Run tests
+        working-directory: android
+        run: ./gradlew :app:testDebugUnitTest --console=plain
+
+      - name: Build APK
+        id: assemble
+        working-directory: android
+        env:
+          RELEASE_KEYSTORE_PATH: ${{ steps.keystore.outputs.signed == 'true' && format('{0}/release.keystore', runner.temp) || '' }}
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.keystore.outputs.signed }}" = "true" ]; then
+            ./gradlew :app:assembleRelease --console=plain
+            echo "apk=app/build/outputs/apk/release/app-release.apk" >> "$GITHUB_OUTPUT"
+          else
+            ./gradlew :app:assembleDebug --console=plain
+            echo "apk=app/build/outputs/apk/debug/app-debug.apk" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Name the APK and checksum it
+        id: apk
+        run: |
+          set -euo pipefail
+          src="android/${{ steps.assemble.outputs.apk }}"
+          suffix=""
+          [ "${{ steps.keystore.outputs.signed }}" = "true" ] || suffix="-debugsigned"
+          out="MyDIDStation-${{ steps.version.outputs.BUILD_NAME }}-${{ steps.version.outputs.BUILD_NUMBER }}${suffix}.apk"
+          cp "$src" "$out"
+          sha=$(sha256sum "$out" | cut -d' ' -f1)
+          size=$(du -h "$out" | cut -f1)
+          echo "path=$out" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          {
+            echo "### My DID Station ${{ steps.version.outputs.BUILD_NAME }} (${{ steps.version.outputs.BUILD_NUMBER }})"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| APK | \`$out\` ($size) |"
+            echo "| SHA-256 | \`$sha\` |"
+            echo "| Signing | $([ "${{ steps.keystore.outputs.signed }}" = "true" ] && echo 'release key' || echo 'debug key') |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ steps.version.outputs.BUILD_NAME }}-${{ steps.version.outputs.BUILD_NUMBER }}
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish release
+        if: ${{ github.event_name == 'push' || inputs.create_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.BUILD_NAME }}
+          name: ${{ steps.version.outputs.BUILD_NAME }}
+          files: ${{ steps.apk.outputs.path }}
+          prerelease: ${{ steps.version.outputs.PRERELEASE == 'true' }}
+          make_latest: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            My DID Station ${{ steps.version.outputs.BUILD_NAME }}.
+
+            - Commit: ${{ github.sha }}
+            - Triggered by: ${{ github.triggering_actor }}
+            - Signed with: ${{ steps.keystore.outputs.signed == 'true' && 'the release key' || 'the debug key' }}
+            - SHA-256: `${{ steps.apk.outputs.sha }}`
+
+            versionCode is `${{ steps.version.outputs.BUILD_NUMBER }}`, so a newer
+            build always installs over an older one. Point Obtainium at this
+            repository and turn on prereleases.
+
+            Version scheme: see `scripts/version.sh`. The committed
+            `android/version.properties` is what F-Droid builds.
