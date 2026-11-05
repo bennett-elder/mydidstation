@@ -175,10 +175,21 @@ fun DidListScreen(container: Container, onOpen: (String) -> Unit, onSettings: ()
                         Column(Modifier.weight(1f)) {
                             Text(row.did, style = MaterialTheme.typography.titleMedium)
                             Text(
-                                plural(row.total, "message") +
-                                    if (row.unread > 0) "  ·  ${row.unread} unread" else "",
+                                if (!row.opened) {
+                                    // Nothing is fetched until you open a number,
+                                    // so there is no count to show yet, and a
+                                    // zero would be a lie.
+                                    "Tap to load"
+                                } else {
+                                    plural(row.total, "message") +
+                                        if (row.unread > 0) "  ·  ${row.unread} unread" else ""
+                                },
                                 style = MaterialTheme.typography.bodySmall,
-                                fontWeight = if (row.unread > 0) FontWeight.SemiBold else FontWeight.Normal,
+                                fontWeight = if (row.opened && row.unread > 0) {
+                                    FontWeight.SemiBold
+                                } else {
+                                    FontWeight.Normal
+                                },
                             )
                         }
                         Text(
@@ -215,12 +226,30 @@ fun ConversationsScreen(
     var rows by remember { mutableStateOf<List<ConvRow>>(emptyList()) }
     var refreshing by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
+    var older by remember { mutableStateOf(LookBack(days = 0, more = false)) }
+    var loadingOlder by remember { mutableStateOf(false) }
 
     suspend fun reload() {
         rows = withContext(Dispatchers.IO) { container.store.conversations(did) }
     }
 
-    LaunchedEffect(did) { reload() }
+    suspend fun refreshOlder() {
+        older = withContext(Dispatchers.IO) { container.sync.lookBackPlan(did) }
+    }
+
+    // Opening a number enrols it and fills its last 92 days. A number you never
+    // open costs nothing, which is what keeps the first launch quick.
+    LaunchedEffect(did) {
+        val firstTime = withContext(Dispatchers.IO) { container.store.windowEnd(did) == 0L }
+        withContext(Dispatchers.IO) { container.store.markOpened(did) }
+        if (firstTime) {
+            refreshing = true
+            runCatching { container.sync.refreshDid(did) }
+            refreshing = false
+        }
+        reload()
+        refreshOlder()
+    }
 
     Scaffold(
         topBar = {
@@ -293,6 +322,37 @@ fun ConversationsScreen(
                         }
                     }
                     HorizontalDivider()
+                }
+                if (older.days > 0) {
+                    // Says exactly how much the tap will pull, and disappears
+                    // once the two year floor is reached.
+                    item {
+                        TextButton(
+                            enabled = !loadingOlder,
+                            onClick = {
+                                scope.launch {
+                                    loadingOlder = true
+                                    status = try {
+                                        "${container.sync.lookBack(did)} older"
+                                    } catch (e: Exception) {
+                                        e.message ?: "could not load older"
+                                    }
+                                    reload()
+                                    refreshOlder()
+                                    loadingOlder = false
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(
+                                when {
+                                    loadingOlder -> "Loading…"
+                                    older.more -> "Load ${older.days} more days"
+                                    else -> "Load the last ${older.days} days"
+                                }
+                            )
+                        }
+                    }
                 }
                 status?.let { item { Text(it, modifier = Modifier.padding(16.dp)) } }
             }

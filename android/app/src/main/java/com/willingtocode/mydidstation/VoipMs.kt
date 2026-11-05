@@ -118,6 +118,14 @@ class VoipMs(private val settings: Settings) {
         return out
     }
 
+    /**
+     * from and to are dates on the wire, not timestamps, so two instants on the
+     * same day describe one indivisible window. The sync layer needs to know
+     * when narrowing further is pointless.
+     */
+    fun sameApiDay(a: Long, b: Long): Boolean =
+        dateFormat.format(Date(a * 1000)) == dateFormat.format(Date(b * 1000))
+
     suspend fun sendSms(did: String, destination: String, body: String): Long? {
         val json = call(
             "method" to "sendSMS",

@@ -6,7 +6,13 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 
 /** One row per DID, with the counts the main list shows. */
-data class DidRow(val did: String, val total: Int, val unread: Int, val lastAt: Long)
+data class DidRow(
+    val did: String,
+    val total: Int,
+    val unread: Int,
+    val lastAt: Long,
+    val opened: Boolean,
+)
 
 /** One row per conversation inside a DID. */
 data class ConvRow(
@@ -43,8 +49,9 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
         db.execSQL(
             """CREATE TABLE did (
                  did TEXT PRIMARY KEY,
-                 enabled INTEGER NOT NULL DEFAULT 1,
+                 enabled INTEGER NOT NULL DEFAULT 0,
                  window_end INTEGER NOT NULL DEFAULT 0,
+                 history_start INTEGER NOT NULL DEFAULT 0,
                  last_remote_id INTEGER
                )"""
         )
@@ -79,16 +86,33 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         // Forward-only. Never drop user data; add migrations as versions grow.
-        // var v = oldVersion
-        // if (v < 2) { ...; v = 2 }
+        // Blocks test oldVersion rather than a running counter, so a database
+        // several versions behind still runs every step in order.
+        if (oldVersion < 2) {
+            // v2 fetches nothing for a number until you open it, so each DID has
+            // to remember how far back it has been filled. Zero means "not known
+            // yet", and the first look-back treats that as the initial window.
+            db.execSQL("ALTER TABLE did ADD COLUMN history_start INTEGER NOT NULL DEFAULT 0")
+        }
     }
 
+    /**
+     * A discovered number starts closed. It is listed, but nothing is fetched
+     * for it until you open it, so a first launch stays cheap however many
+     * numbers the account has.
+     */
     fun putDid(did: String) = synchronized(lock) {
         val values = ContentValues().apply {
             put("did", did)
-            put("enabled", 1)
+            put("enabled", 0)
         }
         writableDatabase.insertWithOnConflict("did", null, values, SQLiteDatabase.CONFLICT_IGNORE)
+    }
+
+    /** Opening a number enrols it: from here it is polled and its counts shown. */
+    fun markOpened(did: String) = synchronized(lock) {
+        val values = ContentValues().apply { put("enabled", 1) }
+        writableDatabase.update("did", values, "did = ?", arrayOf(did))
     }
 
     fun enabledDids(): List<String> = synchronized(lock) {
@@ -103,15 +127,23 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
             SELECT d.did,
                    (SELECT COUNT(*) FROM message m WHERE m.did = d.did) AS total,
                    (SELECT COUNT(*) FROM message m WHERE m.did = d.did AND m.unread = 1) AS unread,
-                   (SELECT COALESCE(MAX(m.sent_at), 0) FROM message m WHERE m.did = d.did) AS last_at
+                   (SELECT COALESCE(MAX(m.sent_at), 0) FROM message m WHERE m.did = d.did) AS last_at,
+                   d.enabled AS opened
               FROM did d
-             WHERE d.enabled = 1
              ORDER BY last_at DESC, d.did ASC
         """
         val out = mutableListOf<DidRow>()
         readableDatabase.rawQuery(sql, null).use { c ->
             while (c.moveToNext()) {
-                out.add(DidRow(c.getString(0), c.getInt(1), c.getInt(2), c.getLong(3)))
+                out.add(
+                    DidRow(
+                        did = c.getString(0),
+                        total = c.getInt(1),
+                        unread = c.getInt(2),
+                        lastAt = c.getLong(3),
+                        opened = c.getInt(4) == 1,
+                    )
+                )
             }
         }
         out
@@ -125,6 +157,18 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
 
     fun setWindowEnd(did: String, end: Long) = synchronized(lock) {
         val values = ContentValues().apply { put("window_end", end) }
+        writableDatabase.update("did", values, "did = ?", arrayOf(did))
+    }
+
+    /** Oldest instant this DID has been filled back to. Zero means not known. */
+    fun historyStart(did: String): Long = synchronized(lock) {
+        readableDatabase.rawQuery("SELECT history_start FROM did WHERE did = ?", arrayOf(did)).use {
+            if (it.moveToFirst()) it.getLong(0) else 0L
+        }
+    }
+
+    fun setHistoryStart(did: String, start: Long) = synchronized(lock) {
+        val values = ContentValues().apply { put("history_start", start) }
         writableDatabase.update("did", values, "did = ?", arrayOf(did))
     }
 
@@ -254,6 +298,6 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
 
     private companion object {
         const val NAME = "mydidstation.db"
-        const val VERSION = 1
+        const val VERSION = 2
     }
 }
