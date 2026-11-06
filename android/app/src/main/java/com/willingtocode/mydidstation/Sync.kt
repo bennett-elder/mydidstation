@@ -16,10 +16,11 @@ data class LookBack(val days: Int, val more: Boolean)
  */
 class Sync(private val store: Store, private val api: VoipMs) {
 
+    /** Records every number the account reports, returning how many are usable. */
     suspend fun discoverDids(): Int = withContext(Dispatchers.IO) {
-        val dids = api.discoverDids()
-        dids.forEach { store.putDid(it) }
-        dids.size
+        val found = api.discoverDids()
+        found.forEach { store.putDid(it.did, hidden = !it.smsEnabled) }
+        found.count { it.smsEnabled }
     }
 
     /** Returns the number of messages that were new to us. */

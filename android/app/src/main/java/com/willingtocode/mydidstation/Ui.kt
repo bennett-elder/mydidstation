@@ -250,6 +250,10 @@ fun DidListScreen(container: Container, onOpen: (String) -> Unit, onSettings: ()
                     refreshing = true
                     val started = System.currentTimeMillis()
                     try {
+                        // Discovery runs here too, so a number the account stops
+                        // supporting disappears on a pull rather than needing the
+                        // credentials saved again.
+                        if (configured) container.sync.discoverDids()
                         val added = container.sync.refreshAll()
                         reload()
                         status = "Refreshed ${plural(rows.size, "number")}, $added new in " +

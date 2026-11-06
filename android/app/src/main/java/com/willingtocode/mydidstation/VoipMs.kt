@@ -15,6 +15,9 @@ import java.util.concurrent.TimeUnit
 
 class ApiException(val status: String) : Exception("VoIP.ms returned status=$status")
 
+/** One number the account reports, and whether the account can message on it. */
+data class DiscoveredDid(val did: String, val smsEnabled: Boolean)
+
 data class RemoteMsg(
     val remoteId: Long,
     val contact: String,
@@ -63,15 +66,19 @@ class VoipMs(private val settings: Settings) {
         if (status != "success") throw ApiException(status)
     }
 
-    suspend fun discoverDids(): List<String> {
+    suspend fun discoverDids(): List<DiscoveredDid> {
         val json = call("method" to "getDIDsInfo")
         requireSuccess(json)
         val array = json.optJSONArray("dids") ?: return emptyList()
-        val out = mutableListOf<String>()
+        val out = mutableListOf<DiscoveredDid>()
         for (i in 0 until array.length()) {
             val row = array.optJSONObject(i) ?: continue
             val did = normalizePhone(row.optString("did"))
-            if (did.isNotEmpty()) out.add(did)
+            if (did.isEmpty()) continue
+            // Absent means the API did not say, which is treated as enabled so a
+            // shape change cannot silently hide every number.
+            val enabled = row.optString("sms_enabled", "1").trim().lowercase()
+            out.add(DiscoveredDid(did, enabled != "0" && enabled != "false"))
         }
         return out
     }

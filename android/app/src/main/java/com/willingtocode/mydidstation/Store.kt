@@ -52,6 +52,7 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
             """CREATE TABLE did (
                  did TEXT PRIMARY KEY,
                  enabled INTEGER NOT NULL DEFAULT 0,
+                 hidden INTEGER NOT NULL DEFAULT 0,
                  window_end INTEGER NOT NULL DEFAULT 0,
                  history_start INTEGER NOT NULL DEFAULT 0,
                  last_remote_id INTEGER
@@ -109,19 +110,31 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
             // exactly like a delivered one.
             db.execSQL("ALTER TABLE message ADD COLUMN carrier_status TEXT NOT NULL DEFAULT ''")
         }
+        if (oldVersion < 5) {
+            // v5 records numbers the account cannot message on. They are kept
+            // rather than deleted, because deleting a DID cascades to its
+            // conversations and messages, and a number can be re-enabled later.
+            db.execSQL("ALTER TABLE did ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
+        }
     }
 
     /**
-     * A discovered number starts closed. It is listed, but nothing is fetched
-     * for it until you open it, so a first launch stays cheap however many
-     * numbers the account has.
+     * Record a discovered number. A number the account cannot message on is kept
+     * but marked hidden, so it disappears from the list without losing whatever
+     * history it already had, and it comes back if SMS is enabled again.
      */
-    fun putDid(did: String) = synchronized(lock) {
+    fun putDid(did: String, hidden: Boolean = false) = synchronized(lock) {
+        val flag = if (hidden) 1 else 0
         val values = ContentValues().apply {
             put("did", did)
             put("enabled", 0)
+            put("hidden", flag)
         }
         writableDatabase.insertWithOnConflict("did", null, values, SQLiteDatabase.CONFLICT_IGNORE)
+        // Existing rows must not lose their enrolled state, but the flag can change
+        // as the account is reconfigured, so patch that column alone.
+        val patch = ContentValues().apply { put("hidden", flag) }
+        writableDatabase.update("did", patch, "did = ?", arrayOf(did))
     }
 
     /** Opening a number enrols it: from here it is polled and its counts shown. */
@@ -132,8 +145,9 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
 
     fun enabledDids(): List<String> = synchronized(lock) {
         val out = mutableListOf<String>()
-        readableDatabase.rawQuery("SELECT did FROM did WHERE enabled = 1 ORDER BY did", null)
-            .use { c -> while (c.moveToNext()) out.add(c.getString(0)) }
+        readableDatabase.rawQuery(
+            "SELECT did FROM did WHERE enabled = 1 AND hidden = 0 ORDER BY did", null,
+        ).use { c -> while (c.moveToNext()) out.add(c.getString(0)) }
         out
     }
 
@@ -145,6 +159,7 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
                    (SELECT COALESCE(MAX(m.sent_at), 0) FROM message m WHERE m.did = d.did) AS last_at,
                    d.enabled AS opened
               FROM did d
+             WHERE d.hidden = 0
              ORDER BY last_at DESC, d.did ASC
         """
         val out = mutableListOf<DidRow>()
@@ -379,6 +394,6 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
 
     private companion object {
         const val NAME = "mydidstation.db"
-        const val VERSION = 4
+        const val VERSION = 5
     }
 }
