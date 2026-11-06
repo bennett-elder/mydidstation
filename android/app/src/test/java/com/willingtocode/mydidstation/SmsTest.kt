@@ -71,6 +71,22 @@ class SmsTest {
     }
 
     @Test
+    fun `split never lands inside an emoji`() {
+        // 73 units, so two parts, and the 67-unit boundary falls on the emoji:
+        // 66 a's then a pair that costs 2, then filler to push it over 70.
+        val text = "a".repeat(66) + "\uD83D\uDE00" + "b".repeat(5)
+        val analysis = Sms.analyze(text)
+        assertEquals(73, analysis.units)
+        assertEquals(2, analysis.segments)
+        val parts = Sms.parts(text, analysis)
+        assertEquals(text, parts.joinToString(""))
+        parts.forEach { part ->
+            assertFalse("part ends on half an emoji", part.last().isHighSurrogate())
+            assertFalse("part starts on half an emoji", part.first().isLowSurrogate())
+        }
+    }
+
+    @Test
     fun `parts always reassemble to the original`() {
         val text = (1..40).joinToString(" ") { "word$it" }
         val analysis = Sms.analyze(text)

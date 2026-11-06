@@ -78,6 +78,10 @@ object Sms {
      * Greedy fill, then back off to the last whitespace so words stay intact.
      * Negative values are markers for a forced cut inside an over-long word;
      * [analyze] uses that only to report `hardBreak`.
+     *
+     * A surrogate pair is one glyph and two units, so it is stepped over whole.
+     * Cutting between the halves of an emoji would leave both parts with a lone
+     * surrogate, which no encoder can turn back into text.
      */
     private fun splitPoints(text: String, partUnits: Int, gsm: Boolean): List<Int> {
         val cuts = mutableListOf<Int>()
@@ -86,10 +90,16 @@ object Sms {
             var units = 0
             var i = start
             while (i < text.length) {
-                val cost = if (gsm) (if (text[i] in GSM_EXTENDED) 2 else 1) else 1
+                val pair = !gsm && text[i].isHighSurrogate() &&
+                    i + 1 < text.length && text[i + 1].isLowSurrogate()
+                val cost = when {
+                    gsm -> if (text[i] in GSM_EXTENDED) 2 else 1
+                    pair -> 2
+                    else -> 1
+                }
                 if (units + cost > partUnits) break
                 units += cost
-                i++
+                i += if (pair) 2 else 1
             }
             if (i >= text.length) break
             val cut = if (i > start && text[i].isWhitespace()) {
