@@ -29,16 +29,22 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
     companion object {
         private const val WORK_NAME = "mydidstation-poll"
 
-        /** Background cadence. WorkManager refuses anything under 15 minutes. */
-        const val INTERVAL_MINUTES = 15L
+        /** WorkManager's floor for periodic work. */
+        const val MIN_BACKGROUND_MINUTES = 15L
 
-        fun schedule(context: Context) {
-            val request = PeriodicWorkRequestBuilder<SyncWorker>(INTERVAL_MINUTES, TimeUnit.MINUTES).build()
-            WorkManager.getInstance(context).enqueueUniquePeriodicWork(
-                WORK_NAME,
-                ExistingPeriodicWorkPolicy.UPDATE,
-                request,
-            )
+        fun schedule(context: Context, rearm: Boolean = false) {
+            val minutes = Settings(context).backgroundMinutes().toLong()
+                .coerceAtLeast(MIN_BACKGROUND_MINUTES)
+            val request = PeriodicWorkRequestBuilder<SyncWorker>(minutes, TimeUnit.MINUTES).build()
+            // UPDATE keeps the existing schedule, which is what an app start wants.
+            // A deliberate interval change needs CANCEL_AND_REENQUEUE, or the new
+            // number would not apply until the old period ran out.
+            val policy = if (rearm) {
+                ExistingPeriodicWorkPolicy.CANCEL_AND_REENQUEUE
+            } else {
+                ExistingPeriodicWorkPolicy.UPDATE
+            }
+            WorkManager.getInstance(context).enqueueUniquePeriodicWork(WORK_NAME, policy, request)
         }
 
         /**
@@ -60,7 +66,9 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
                 null
             }
             if (scheduled != null && scheduled > 0L && scheduled != Long.MAX_VALUE) return scheduled
-            return lastPollAt.takeIf { it > 0L }?.plus(TimeUnit.MINUTES.toMillis(INTERVAL_MINUTES))
+            val minutes = Settings(context).backgroundMinutes().toLong()
+                .coerceAtLeast(MIN_BACKGROUND_MINUTES)
+            return lastPollAt.takeIf { it > 0L }?.plus(TimeUnit.MINUTES.toMillis(minutes))
         }
     }
 }

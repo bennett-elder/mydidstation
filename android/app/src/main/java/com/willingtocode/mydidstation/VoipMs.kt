@@ -51,7 +51,7 @@ class VoipMs(private val settings: Settings) {
                 addFormDataPart("api_password", creds.second)
                 params.forEach { (k, v) -> addFormDataPart(k, v) }
             }.build()
-            val request = Request.Builder().url(ENDPOINT).post(form).build()
+            val request = Request.Builder().url(settings.endpoint()).post(form).build()
             http.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
                 JSONObject(response.body.string())
@@ -141,7 +141,6 @@ class VoipMs(private val settings: Settings) {
     }
 
     companion object {
-        private const val ENDPOINT = "https://voip.ms/api/v1/rest.php"
         private val API_TZ: TimeZone = TimeZone.getTimeZone("America/New_York")
 
         fun normalizePhone(raw: String): String {

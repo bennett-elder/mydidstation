@@ -2,6 +2,9 @@ package com.willingtocode.mydidstation
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Box
@@ -34,6 +37,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -44,10 +48,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -117,6 +125,27 @@ private fun SyncStatus(container: Container, summary: String?) {
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
         )
     }
+}
+
+/**
+ * Whether this screen is actually in front of the user. A foreground poll must
+ * stop when the app goes to the background, and Compose keeps the composition
+ * alive then, so lifecycle state is the only reliable signal.
+ */
+@Composable
+private fun isResumed(): Boolean {
+    val owner = LocalLifecycleOwner.current
+    var resumed by remember {
+        mutableStateOf(owner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+    }
+    DisposableEffect(owner) {
+        val observer = LifecycleEventObserver { _, _ ->
+            resumed = owner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+        }
+        owner.lifecycle.addObserver(observer)
+        onDispose { owner.lifecycle.removeObserver(observer) }
+    }
+    return resumed
 }
 
 @Composable
@@ -201,7 +230,11 @@ fun DidListScreen(container: Container, onOpen: (String) -> Unit, onSettings: ()
                     Column {
                         Text("My DID Station")
                         Text(
-                            "Numbers · VoIP.ms",
+                            if (container.settings.usingCustomEndpoint()) {
+                                "Numbers · not the real API"
+                            } else {
+                                "Numbers · VoIP.ms"
+                            },
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
@@ -322,6 +355,27 @@ fun ConversationsScreen(
         }
         reload()
         refreshOlder()
+    }
+
+    // Foreground cadence: poll only the number you are looking at, and only while
+    // this screen is in front of you. The setting is read on each tick, so a change
+    // takes effect without leaving the screen.
+    val resumed = isResumed()
+    LaunchedEffect(did, resumed) {
+        if (!resumed) return@LaunchedEffect
+        while (true) {
+            val seconds = container.settings.foregroundSeconds()
+            if (seconds <= 0) break
+            delay(seconds * 1000L)
+            val started = System.currentTimeMillis()
+            val added = runCatching { container.sync.refreshDid(did) }.getOrDefault(0)
+            reload()
+            refreshOlder()
+            if (added > 0) {
+                status = "Refreshed, $added new in " +
+                    durationText(System.currentTimeMillis() - started)
+            }
+        }
     }
 
     Scaffold(
@@ -475,6 +529,20 @@ fun MessagesScreen(
     val newestId = messages.lastOrNull()?.id
     LaunchedEffect(newestId) {
         if (newestId != null) listState.scrollToItem(messages.lastIndex)
+    }
+
+    // Same foreground cadence as the conversation list, for when you are reading a
+    // thread rather than scanning it.
+    val resumed = isResumed()
+    LaunchedEffect(did, resumed) {
+        if (!resumed) return@LaunchedEffect
+        while (true) {
+            val seconds = container.settings.foregroundSeconds()
+            if (seconds <= 0) break
+            delay(seconds * 1000L)
+            runCatching { container.sync.refreshDid(did) }
+            reload()
+        }
     }
 
     // Typing a number that already has history should reveal it, not wait for send.
@@ -695,6 +763,35 @@ fun MessagesScreen(
     }
 }
 
+/** A label and a row of mutually exclusive choices, used for the sync cadence. */
+@Composable
+private fun ChoiceRow(
+    label: String,
+    options: List<Pair<String, Int>>,
+    selected: Int,
+    onPick: (Int) -> Unit,
+) {
+    Column {
+        Text(label, style = MaterialTheme.typography.bodySmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            options.forEach { (text, value) ->
+                val chosen = value == selected
+                TextButton(onClick = { onPick(value) }) {
+                    Text(
+                        text,
+                        fontWeight = if (chosen) FontWeight.Bold else FontWeight.Normal,
+                        color = if (chosen) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(container: Container, onDone: () -> Unit) {
@@ -706,6 +803,11 @@ fun SettingsScreen(container: Container, onDone: () -> Unit) {
     var found by remember { mutableStateOf<Int?>(null) }
     val viewFocus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
+    val context = LocalContext.current
+    var foreground by remember { mutableStateOf(container.settings.foregroundSeconds()) }
+    var background by remember { mutableStateOf(container.settings.backgroundMinutes()) }
+    var endpoint by remember { mutableStateOf(container.settings.endpoint()) }
+    var showEndpoint by remember { mutableStateOf(false) }
 
     // When numbers turn up, hand focus to the button that goes to see them. That
     // also drops it from the credential fields, and the keyboard closes.
@@ -720,7 +822,8 @@ fun SettingsScreen(container: Container, onDone: () -> Unit) {
         },
     ) { padding ->
         Column(
-            Modifier.padding(padding).fillMaxSize().imePadding().padding(16.dp),
+            Modifier.padding(padding).fillMaxSize().imePadding().verticalScroll(rememberScrollState())
+                .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text("VoIP.ms API credentials", style = MaterialTheme.typography.titleMedium)
@@ -777,6 +880,63 @@ fun SettingsScreen(container: Container, onDone: () -> Unit) {
                     Text(if (count == 1) "View the number" else "View $count numbers")
                 }
             }
+
+            HorizontalDivider()
+            Text(
+                "Sync",
+                style = MaterialTheme.typography.titleMedium,
+                // Hidden on purpose: long-press to reveal the endpoint override, so
+                // this stays out of the way of ordinary use but is reachable when
+                // pointing the app at the mock server.
+                modifier = Modifier.pointerInput(Unit) {
+                    detectTapGestures(onLongPress = { showEndpoint = !showEndpoint })
+                },
+            )
+            if (showEndpoint) {
+                OutlinedTextField(
+                    value = endpoint,
+                    onValueChange = {
+                        endpoint = it
+                        container.settings.setEndpoint(it)
+                    },
+                    label = { Text("API endpoint") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    "For a local mock, use http://10.0.2.2:8765/rest.php on an emulator, " +
+                        "or http://localhost:8765/rest.php on a phone after " +
+                        "adb reverse tcp:8765 tcp:8765. Clear the field to go back to " +
+                        "VoIP.ms. Credentials are sent to whatever is in here, so treat " +
+                        "it as a development control.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Text(
+                "Polling costs one request per number per tick, so these are the two " +
+                    "knobs that decide how much the app talks to VoIP.ms.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            ChoiceRow(
+                label = "While a number is open",
+                options = listOf("30 s" to 30, "60 s" to 60, "2 min" to 120, "off" to 0),
+                selected = foreground,
+                onPick = {
+                    foreground = it
+                    container.settings.setForegroundSeconds(it)
+                },
+            )
+            ChoiceRow(
+                label = "In the background",
+                options = listOf("15 min" to 15, "30 min" to 30, "60 min" to 60),
+                selected = background,
+                onPick = {
+                    background = it
+                    container.settings.setBackgroundMinutes(it)
+                    // Re-arm so the new interval applies now, not after the old one.
+                    SyncWorker.schedule(context, rearm = true)
+                },
+            )
         }
     }
 }
