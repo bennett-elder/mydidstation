@@ -65,6 +65,20 @@ class Settings(context: Context) {
         prefs.edit().putInt(KEY_BACKGROUND_MINUTES, minutes.coerceAtLeast(15)).apply()
     }
 
+    /** Whether a poll that finds new messages is allowed to notify. */
+    fun notificationsEnabled(): Boolean = prefs.getBoolean(KEY_NOTIFY, true)
+
+    fun setNotificationsEnabled(on: Boolean) {
+        prefs.edit().putBoolean(KEY_NOTIFY, on).apply()
+    }
+
+    /** True once the permission has been asked for, so the prompt does not nag. */
+    fun notifyAsked(): Boolean = prefs.getBoolean(KEY_NOTIFY_ASKED, false)
+
+    fun setNotifyAsked() {
+        prefs.edit().putBoolean(KEY_NOTIFY_ASKED, true).apply()
+    }
+
     private companion object {
         const val KEY_EMAIL = "api_email"
         const val KEY_PASSWORD = "api_password"
@@ -73,6 +87,8 @@ class Settings(context: Context) {
         const val DEFAULT_ENDPOINT = "https://voip.ms/api/v1/rest.php"
         const val KEY_FOREGROUND_SECONDS = "foreground_seconds"
         const val KEY_BACKGROUND_MINUTES = "background_minutes"
+        const val KEY_NOTIFY = "notify_incoming"
+        const val KEY_NOTIFY_ASKED = "notify_permission_asked"
 
         const val DEFAULT_FOREGROUND_SECONDS = 60
         const val DEFAULT_BACKGROUND_MINUTES = 15

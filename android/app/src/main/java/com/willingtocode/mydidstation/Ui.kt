@@ -1,6 +1,12 @@
 package com.willingtocode.mydidstation
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.rememberScrollState
@@ -40,6 +46,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -160,9 +167,26 @@ sealed interface Screen {
     data object Settings : Screen
 }
 
+/** A conversation a notification wants opened, as read from the intent. */
+data class Target(val did: String, val contact: String)
+
 @Composable
-fun Root(container: Container) {
-    var screen by remember { mutableStateOf<Screen>(Screen.Dids) }
+fun Root(container: Container, open: Target? = null, onConsumed: () -> Unit = {}) {
+    // A notification tap starts at the thread it is about, rather than flashing
+    // the numbers list on the way.
+    var screen by remember {
+        mutableStateOf<Screen>(
+            open?.let { Screen.Msgs(it.did, 0L, it.contact) } ?: Screen.Dids,
+        )
+    }
+
+    LaunchedEffect(open) {
+        if (open != null) {
+            screen = Screen.Msgs(open.did, 0L, open.contact)
+            onConsumed()
+        }
+    }
+
     when (val current = screen) {
         Screen.Dids -> {
             BackHandler(enabled = false) {}
@@ -185,14 +209,19 @@ fun Root(container: Container) {
         }
 
         is Screen.Msgs -> {
-            BackHandler { screen = Screen.Convs(current.did) }
-            MessagesScreen(
-                container = container,
-                did = current.did,
-                conversationId = current.convId,
-                contact = current.contact,
-                onBack = { screen = Screen.Convs(current.did) },
-            )
+            // Keyed, because a notification tap can go from one thread straight to
+            // another. Without this the screen keeps the previous conversation's
+            // remembered state and shows the wrong messages.
+            key(current.did, current.convId, current.contact) {
+                BackHandler { screen = Screen.Convs(current.did) }
+                MessagesScreen(
+                    container = container,
+                    did = current.did,
+                    conversationId = current.convId,
+                    contact = current.contact,
+                    onBack = { screen = Screen.Convs(current.did) },
+                )
+            }
         }
 
         Screen.Settings -> {
@@ -211,6 +240,11 @@ fun DidListScreen(container: Container, onOpen: (String) -> Unit, onSettings: ()
     var status by remember { mutableStateOf<String?>(null) }
     val configured = remember { container.settings.credentials() != null }
 
+    val context = LocalContext.current
+    val permission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* the system is the record of the answer; it is re-read where it matters */ }
+
     suspend fun reload() {
         rows = withContext(Dispatchers.IO) { container.store.didsWithCounts() }
     }
@@ -221,6 +255,21 @@ fun DidListScreen(container: Container, onOpen: (String) -> Unit, onSettings: ()
             runCatching { container.sync.discoverDids() }
             reload()
         }
+    }
+
+    // Asked once, on the first run. A messaging app that silently never notifies
+    // reads as broken rather than as quiet, and Android 13 will not ask on its own.
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return@LaunchedEffect
+        val settings = container.settings
+        if (!settings.notificationsEnabled() || settings.notifyAsked()) return@LaunchedEffect
+        val granted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) return@LaunchedEffect
+        settings.setNotifyAsked()
+        permission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
     Scaffold(
@@ -525,6 +574,16 @@ fun MessagesScreen(
             container.store.markConversationRead(resolvedId)
             container.store.messages(resolvedId)
         }
+        // Reading it here is what makes its notification pointless.
+        if (resolvedContact.isNotEmpty()) container.notifier.cancel(did, resolvedContact)
+    }
+
+    // While this thread is on screen its own arrivals stay quiet, so reading is
+    // not interrupted by a notification for the thing already in front of you.
+    DisposableEffect(did, resolvedContact) {
+        val key = VisibleThread.of(did, resolvedContact)
+        VisibleThread.key = key
+        onDispose { if (VisibleThread.key == key) VisibleThread.key = null }
     }
 
     // A thread opens at its newest message. Keyed on the newest id rather than
@@ -550,20 +609,24 @@ fun MessagesScreen(
     }
 
     // Typing a number that already has history should reveal it, not wait for send.
+    // A notification tap arrives with the contact but no conversation id, so the
+    // same lookup is what fills the thread in that case too.
     LaunchedEffect(to) {
+        if (resolvedId != 0L) {
+            reload()
+            return@LaunchedEffect
+        }
         val normalized = VoipMs.normalizePhone(to)
-        if (resolvedContact.isEmpty() && normalized.length >= 7) {
+        if (normalized.length >= 7) {
             val existing = withContext(Dispatchers.IO) {
                 container.store.conversationId(did, normalized)
             }
             if (existing != 0L) {
                 resolvedId = existing
                 resolvedContact = normalized
-                reload()
             }
-        } else {
-            reload()
         }
+        reload()
     }
 
     val sendableContact = VoipMs.normalizePhone(to)
@@ -812,6 +875,25 @@ fun SettingsScreen(container: Container, onDone: () -> Unit) {
     var background by remember { mutableStateOf(container.settings.backgroundMinutes()) }
     var endpoint by remember { mutableStateOf(container.settings.endpoint()) }
     var showEndpoint by remember { mutableStateOf(false) }
+    var notifyOn by remember { mutableStateOf(container.settings.notificationsEnabled()) }
+    var notifyAllowed by remember {
+        mutableStateOf(
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                ) == PackageManager.PERMISSION_GRANTED,
+        )
+    }
+    val permission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { notifyAllowed = it }
+
+    fun askToNotify() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
 
     // When numbers turn up, hand focus to the button that goes to see them. That
     // also drops it from the credential fields, and the keyboard closes.
@@ -941,6 +1023,38 @@ fun SettingsScreen(container: Container, onDone: () -> Unit) {
                     SyncWorker.schedule(context, rearm = true)
                 },
             )
+
+            HorizontalDivider()
+            Text("Notifications", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "One notification per conversation, replaced as more messages arrive. " +
+                    "The thread you are reading never notifies, and opening a thread " +
+                    "clears its notification.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            ChoiceRow(
+                label = "When a poll finds new messages",
+                options = listOf("on" to 1, "off" to 0),
+                selected = if (notifyOn) 1 else 0,
+                onPick = {
+                    notifyOn = it == 1
+                    container.settings.setNotificationsEnabled(notifyOn)
+                    if (notifyOn) askToNotify()
+                },
+            )
+            if (notifyOn && !notifyAllowed) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "Android is blocking notifications for this app.",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = { askToNotify() }) { Text("Allow") }
+                }
+            }
         }
     }
 }

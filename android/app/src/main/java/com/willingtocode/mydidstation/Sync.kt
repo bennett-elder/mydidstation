@@ -14,7 +14,11 @@ data class LookBack(val days: Int, val more: Boolean)
  * Nothing is fetched for a number until it is opened. Opening it fills the last
  * INITIAL_WINDOW_SECONDS, and [lookBack] reaches further only when asked.
  */
-class Sync(private val store: Store, private val api: VoipMs) {
+class Sync(
+    private val store: Store,
+    private val api: VoipMs,
+    private val notifier: Notifier,
+) {
 
     /** Records every number the account reports, returning how many are usable. */
     suspend fun discoverDids(): Int = withContext(Dispatchers.IO) {
@@ -46,7 +50,24 @@ class Sync(private val store: Store, private val api: VoipMs) {
     /** Steady state: one window that starts just before the last one ended. */
     private suspend fun poll(did: String, cursor: Long, now: Long): Int {
         val from = maxOf(cursor - OVERLAP_SECONDS, now - MAX_RANGE_SECONDS)
-        return ingest(did, fetchWindow(did, from, now), unread = true)
+        val fresh = mutableListOf<RemoteMsg>()
+        val added = ingest(did, fetchWindow(did, from, now), unread = true, fresh = fresh)
+        notifyNew(did, fresh)
+        return added
+    }
+
+    /**
+     * One notification per conversation, carrying the newest text and how many
+     * arrived. The thread screen suppresses its own, so reading is not noisy.
+     */
+    private fun notifyNew(did: String, fresh: List<RemoteMsg>) {
+        fresh.filter { it.incoming }.groupBy { it.contact }.forEach { (contact, messages) ->
+            // The id breaks the tie when several messages share a second, which
+            // the API does for anything arriving together.
+            val newest = messages.maxWithOrNull(compareBy({ it.sentAt }, { it.remoteId }))
+                ?: return@forEach
+            notifier.newIncoming(did, contact, newest.body, messages.size)
+        }
     }
 
     /** What the next tap of load-more would pull, so the label can say how much. */
@@ -86,7 +107,17 @@ class Sync(private val store: Store, private val api: VoipMs) {
         return if (recorded > 0) recorded else now - INITIAL_WINDOW_SECONDS
     }
 
-    private fun ingest(did: String, messages: List<RemoteMsg>, unread: Boolean): Int {
+    /**
+     * Stores a window's messages. [fresh] collects the ones that were new and
+     * incoming, which is what a notification is for; older history and the first
+     * look at a number pass null because they must not buzz.
+     */
+    private fun ingest(
+        did: String,
+        messages: List<RemoteMsg>,
+        unread: Boolean,
+        fresh: MutableList<RemoteMsg>? = null,
+    ): Int {
         var added = 0
         for (message in messages) {
             val isNew = store.upsertRemote(
@@ -100,7 +131,10 @@ class Sync(private val store: Store, private val api: VoipMs) {
                 unread = unread && message.incoming,
                 carrierStatus = message.carrierStatus,
             )
-            if (isNew) added++
+            if (isNew) {
+                added++
+                if (message.incoming) fresh?.add(message)
+            }
         }
         return added
     }
