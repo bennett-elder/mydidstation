@@ -44,10 +44,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -56,6 +58,66 @@ import java.util.Locale
 
 /** A pending row older than this is assumed to have never been sent. */
 private const val STALE_PENDING_SECONDS = 15L * 60
+
+/** "12:34" style countdown to the next background poll. */
+private fun countdownText(nextAt: Long?, now: Long): String? {
+    if (nextAt == null) return null
+    val left = nextAt - now
+    if (left <= 0) return "due now"
+    val secs = left / 1000
+    return if (secs >= 3600) {
+        String.format(Locale.US, "%dh %02dm", secs / 3600, (secs % 3600) / 60)
+    } else {
+        String.format(Locale.US, "%d:%02d", secs / 60, secs % 60)
+    }
+}
+
+private fun durationText(millis: Long): String = String.format(Locale.US, "%.1f s", millis / 1000.0)
+
+/**
+ * The status strip, kept at the top of a list so it stays visible however many
+ * rows there are. It owns its one-second tick, so only this line recomposes.
+ */
+@Composable
+private fun SyncStatus(container: Container, summary: String?) {
+    val context = LocalContext.current
+    var nextAt by remember { mutableStateOf<Long?>(null) }
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    var lastProbe by remember { mutableStateOf(0L) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            val tick = System.currentTimeMillis()
+            now = tick
+            val current = nextAt
+            val stale = current == null || tick >= current
+            // Ask again once the countdown runs out, but no more than every few
+            // seconds, so an unknown schedule does not mean a query per second.
+            if (stale && tick - lastProbe > 5_000) {
+                lastProbe = tick
+                nextAt = withContext(Dispatchers.IO) {
+                    SyncWorker.nextRunMillis(context, container.settings.lastPollAt())
+                }
+            }
+            delay(1000)
+        }
+    }
+
+    val countdown = countdownText(nextAt, now)
+    val text = when {
+        summary != null && countdown != null -> "$summary  ·  next in $countdown"
+        summary != null -> summary
+        countdown != null -> "next refresh in $countdown"
+        else -> null
+    }
+    if (text != null) {
+        Text(
+            text,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+        )
+    }
+}
 
 @Composable
 fun MyDidStationTheme(content: @Composable () -> Unit) {
@@ -153,19 +215,22 @@ fun DidListScreen(container: Container, onOpen: (String) -> Unit, onSettings: ()
             onRefresh = {
                 scope.launch {
                     refreshing = true
-                    status = try {
+                    val started = System.currentTimeMillis()
+                    try {
                         val added = container.sync.refreshAll()
-                        "refreshed ${rows.size} number(s), $added new"
+                        reload()
+                        status = "Refreshed ${plural(rows.size, "number")}, $added new in " +
+                            durationText(System.currentTimeMillis() - started)
                     } catch (e: Exception) {
-                        e.message ?: "refresh failed"
+                        status = e.message ?: "refresh failed"
                     }
-                    reload()
                     refreshing = false
                 }
             },
             modifier = Modifier.padding(padding).fillMaxSize(),
         ) {
             LazyColumn(Modifier.fillMaxSize()) {
+                item { SyncStatus(container, status) }
                 if (!configured) {
                     item {
                         Text(
@@ -209,9 +274,6 @@ fun DidListScreen(container: Container, onOpen: (String) -> Unit, onSettings: ()
                         )
                     }
                     HorizontalDivider()
-                }
-                status?.let { message ->
-                    item { Text(message, modifier = Modifier.padding(16.dp)) }
                 }
             }
         }
@@ -283,19 +345,22 @@ fun ConversationsScreen(
             onRefresh = {
                 scope.launch {
                     refreshing = true
-                    status = try {
+                    val started = System.currentTimeMillis()
+                    try {
                         val added = container.sync.refreshDid(did)
-                        "$added new"
+                        reload()
+                        status = "Refreshed, $added new in " +
+                            durationText(System.currentTimeMillis() - started)
                     } catch (e: Exception) {
-                        e.message ?: "refresh failed"
+                        status = e.message ?: "refresh failed"
                     }
-                    reload()
                     refreshing = false
                 }
             },
             modifier = Modifier.padding(padding).fillMaxSize(),
         ) {
             LazyColumn(Modifier.fillMaxSize()) {
+                item { SyncStatus(container, status) }
                 if (rows.isEmpty()) {
                     item {
                         Text(
@@ -365,7 +430,6 @@ fun ConversationsScreen(
                         }
                     }
                 }
-                status?.let { item { Text(it, modifier = Modifier.padding(16.dp)) } }
             }
         }
     }
