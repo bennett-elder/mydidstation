@@ -41,8 +41,31 @@ from urllib.parse import parse_qs, urlparse
 LOCK = threading.Lock()
 
 DIDS = [
-    {"did": "5551234567", "description": "Mock main"},
-    {"did": "5559876543", "description": "Mock side"},
+    {
+        "did": "5551234567",
+        "description": "Mock main",
+        "routing": "account:100001_VoIP",
+        "pop": "16",
+        "billing_type": "2",
+        "cnam": "1",
+        "sms_available": "1",
+        "sms_enabled": "1",
+        "sms_email": "mock@example.com",
+        "sms_email_enabled": "0",
+        "sms_url_callback": "",
+        "sms_url_callback_enabled": "0",
+        "smpp_enabled": "0",
+    },
+    {
+        "did": "5559876543",
+        "description": "Mock side, no SMS on this one",
+        "routing": "account:100001_VoIP",
+        "pop": "16",
+        "billing_type": "2",
+        "cnam": "0",
+        "sms_available": "0",
+        "sms_enabled": "0",
+    },
 ]
 
 STATE = {"messages": [], "next_id": 9000, "fail_code": 0, "fail_remaining": 0, "delay_ms": 0}
