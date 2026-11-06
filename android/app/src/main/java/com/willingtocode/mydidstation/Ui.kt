@@ -17,6 +17,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedTextField
@@ -725,7 +731,12 @@ fun MessagesScreen(
                                 modifier = Modifier.fillMaxWidth(0.8f),
                             ) {
                                 Column(Modifier.padding(10.dp)) {
-                                    if (message.body.isNotBlank()) Text(message.body)
+                                    if (message.body.isNotBlank()) {
+                                        MessageBody(
+                                            text = message.body,
+                                            linkColor = MaterialTheme.colorScheme.primary,
+                                        )
+                                    }
                                     message.media.forEach { url ->
                                         // MMS rendering comes next; the URL is real and clickable later.
                                         Text(
@@ -828,6 +839,35 @@ fun MessagesScreen(
             }
         }
     }
+}
+
+/**
+ * A message body, with its links tappable and its text selectable.
+ *
+ * Selection is the outer container on purpose: a long press starts a selection, so
+ * the handles, Copy and Select all come from the platform. A tap still reaches a
+ * link inside it, because Compose resolves the link annotation before the gesture
+ * becomes a selection.
+ */
+@Composable
+private fun MessageBody(text: String, linkColor: Color) {
+    val linkStyles = TextLinkStyles(
+        style = SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline),
+    )
+    val annotated = remember(text, linkStyles) {
+        buildAnnotatedString {
+            append(text)
+            TextLinks.find(text).forEach { range ->
+                val url = TextLinks.toUrl(text.substring(range.first, range.last + 1))
+                addLink(
+                    LinkAnnotation.Url(url = url, styles = linkStyles),
+                    range.first,
+                    range.last + 1,
+                )
+            }
+        }
+    }
+    SelectionContainer { Text(annotated) }
 }
 
 /** A label and a row of mutually exclusive choices, used for the sync cadence. */
