@@ -462,12 +462,16 @@ class Handler(BaseHTTPRequestHandler):
             if not rows:
                 return self.send_json({"status": "message_not_found"})
             requested = fields.get("format", "mp3")
-            return self.send_json({"status": "success", "message": [{
+            # An object, not an array of one. That is what the real API answers, and
+            # the vendor's documentation shows the array, so a mock that follows the
+            # doc hides the mismatch until a phone hits the real server. Both are
+            # accepted by the app; this serves the shape the account actually returns.
+            return self.send_json({"status": "success", "message": {
                 "mailbox": mailbox,
                 "folder": folder,
                 "message_num": rows[0]["message_num"],
                 "data": audio_b64(rows[0], requested),
-            }]})
+            }})
 
         if method == "markListenedVoicemailMessage":
             mailbox = fields.get("mailbox", "")

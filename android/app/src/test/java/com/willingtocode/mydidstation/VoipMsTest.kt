@@ -7,6 +7,7 @@ import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -260,6 +261,29 @@ class VoipMsTest {
         val api = api()
         assertTrue(api.audioLengthAllowed(1024))
         assertFalse(api.audioLengthAllowed(Int.MAX_VALUE))
+    }
+
+    @Test
+    fun `audio is accepted from an object instead of an array`() = runBlocking {
+        val audio = byteArrayOf(0x52, 0x49, 0x46, 0x46)
+        val encoded = android.util.Base64.encodeToString(audio, android.util.Base64.NO_WRAP)
+        reply("""{"status":"success","message":{"message_num":7,"data":"$encoded"}}""")
+        val decoded = api().voicemailAudio("1001", "INBOX", 7)
+        assertTrue("audio did not round-trip", audio.contentEquals(decoded))
+    }
+
+    @Test
+    fun `an empty success names the request and the fields it did get`() = runBlocking {
+        // Not a shape the API sends, but the failure mode that hid a real bug for two
+        // releases: a success with nothing where the parser looks used to say
+        // "no_message", which is a Fax status code and told nobody anything.
+        reply("""{"status":"success","message":[]}""")
+        val failure = runCatching { api().voicemailAudio("1001", "Old", 3) }
+            .exceptionOrNull()
+        assertNotNull("an empty response has to fail", failure)
+        val text = failure?.message.orEmpty()
+        assertTrue("request missing from '$text'", text.contains("1001/Old/3"))
+        assertTrue("field names missing from '$text'", text.contains("status"))
     }
 
     @Test

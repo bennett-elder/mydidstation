@@ -269,13 +269,51 @@ class VoipMs(private val settings: ApiSettings) {
             "message_num" to messageNum.toString(),
         )
         requireSuccess(json)
-        val row = json.optJSONArray("message")?.optJSONObject(0)
-            ?: throw ApiException("no_message")
-        val data = row.optString("data")
+        val data = firstData(json, mailbox, folder, messageNum)
         if (!audioLengthAllowed(data.length)) throw ApiException("audio_too_large")
         val bytes = Base64.decode(data, Base64.DEFAULT)
         if (bytes.size > MAX_AUDIO_BYTES) throw ApiException("audio_too_large")
         return bytes
+    }
+
+    /**
+     * The base64 out of a `getVoicemailMessageFile` response.
+     *
+     * The vendor documents `message` as an array holding one object. The real API returns
+     * the object itself, and parsing only the documented array is why every recording on a
+     * real account failed with nothing to show for it. Both shapes are accepted, and the
+     * failure names the request and the fields that did arrive.
+     */
+    private fun firstData(
+        json: JSONObject,
+        mailbox: String,
+        folder: String,
+        messageNum: Int,
+    ): String {
+        val inArray = json.optJSONArray("message")?.optJSONObject(0)
+        val inObject = json.optJSONObject("message")
+        val data = inArray?.optString("data")
+            ?: inObject?.optString("data")
+            ?: json.optString("data")
+        if (data.isNullOrBlank()) {
+            // The API answers success with an empty `data` when the mailbox, folder and
+            // number do not describe a recording. Echoing back what it recognised is what
+            // separates a wrong identity from an empty file, and it is the only thing the
+            // phone can tell us when nobody is watching the wire.
+            val echo = (json.optJSONObject("message") ?: json.optJSONArray("message")?.optJSONObject(0))
+                ?.let { row ->
+                    listOf("mailbox", "folder", "message_num")
+                        .mapNotNull { key -> row.optString(key).takeIf { it.isNotEmpty() }?.let { "$key=$it" } }
+                        .joinToString(" ")
+                }
+                .orEmpty()
+            val keys = json.keys().asSequence().joinToString(",")
+            throw ApiException(
+                "no audio for $mailbox/$folder/$messageNum (fields: $keys)" +
+                    if (echo.isNotEmpty()) " (echoed: $echo)" else "",
+            )
+        }
+        return data
     }
 
     /**
