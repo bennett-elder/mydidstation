@@ -148,7 +148,13 @@ class VoipMs(private val settings: Settings) {
     }
 
     companion object {
-        private val API_TZ: TimeZone = TimeZone.getTimeZone("America/New_York")
+        /**
+         * The API is asked for `timezone=-5`, a fixed offset, so every response is
+         * a wall time at UTC-5 all year. Parsing those as `America/New_York` was an
+         * hour wrong from March to November, because that zone runs at UTC-4 under
+         * daylight saving, which quietly moved an hour of every summer timestamp.
+         */
+        private val API_TZ: TimeZone = TimeZone.getTimeZone("GMT-5")
 
         fun normalizePhone(raw: String): String {
             val digits = raw.filter { it.isDigit() }
