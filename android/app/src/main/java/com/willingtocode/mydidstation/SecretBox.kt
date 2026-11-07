@@ -17,11 +17,17 @@ import javax.crypto.spec.GCMParameterSpec
  */
 interface SecretBox {
 
-    /** Returns the ciphertext, encoded for storage. */
-    fun seal(plain: String): String
+    /**
+     * Returns the ciphertext, encoded for storage. [purpose] is authenticated with the
+     * value, so a blob sealed for one use cannot be opened as another.
+     */
+    fun seal(purpose: String, plain: String): String
 
-    /** Returns null when the value is damaged or was sealed under a key that is gone. */
-    fun open(sealed: String): String?
+    /**
+     * Returns null when the value is damaged, was sealed for a different [purpose], or
+     * was sealed under a key that is gone.
+     */
+    fun open(purpose: String, sealed: String): String?
 }
 
 /**
@@ -34,13 +40,16 @@ interface SecretBox {
  *
  * The IV comes from the Keystore rather than from this code, because GCM IV reuse is
  * catastrophic and `setRandomizedEncryptionRequired` is the default that prevents it.
- * Layout is `version || ivLength || iv || ciphertext`, then base64.
+ * That default is written out at the key, so a later edit cannot quietly drop it.
+ * Layout is `version || ivLength || iv || ciphertext`, then base64, and [purpose] is
+ * authenticated as associated data.
  */
 class KeystoreBox : SecretBox {
 
-    override fun seal(plain: String): String {
+    override fun seal(purpose: String, plain: String): String {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, key())
+        cipher.updateAAD(purpose.toByteArray(Charsets.UTF_8))
         val iv = cipher.iv
         val body = cipher.doFinal(plain.toByteArray(Charsets.UTF_8))
         val out = ByteArray(2 + iv.size + body.size)
@@ -51,7 +60,7 @@ class KeystoreBox : SecretBox {
         return Base64.encodeToString(out, Base64.NO_WRAP)
     }
 
-    override fun open(sealed: String): String? = try {
+    override fun open(purpose: String, sealed: String): String? = try {
         val raw = Base64.decode(sealed, Base64.NO_WRAP)
         if (raw.size < 2 + MIN_IV_BYTES + TAG_BYTES || raw[0] != VERSION) {
             null
@@ -64,12 +73,14 @@ class KeystoreBox : SecretBox {
                 val body = raw.copyOfRange(2 + ivSize, raw.size)
                 val cipher = Cipher.getInstance(TRANSFORMATION)
                 cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(TAG_BITS, iv))
+                cipher.updateAAD(purpose.toByteArray(Charsets.UTF_8))
                 String(cipher.doFinal(body), Charsets.UTF_8)
             }
         }
     } catch (_: Exception) {
-        // Damaged, sealed under another key, or the key was invalidated by the system.
-        // All three mean "no credentials", and none of them may crash a poll.
+        // Damaged, sealed under another purpose or another key, or the key was
+        // invalidated by the system. All of those mean "no credentials", and none of
+        // them may crash a poll.
         null
     }
 
@@ -87,6 +98,10 @@ class KeystoreBox : SecretBox {
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                 .setKeySize(KEY_BITS)
+                // The default, stated so it cannot be lost: the Keystore picks the IV
+                // and refuses a caller-supplied one, which is what makes GCM IV reuse
+                // impossible from this code.
+                .setRandomizedEncryptionRequired(true)
                 .build(),
         )
         return generator.generateKey()

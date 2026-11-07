@@ -35,17 +35,20 @@ class SettingsTest {
         var failToOpen = false
         var failToSeal = false
 
-        override fun seal(plain: String): String {
+        override fun seal(purpose: String, plain: String): String {
             if (failToSeal) throw IllegalStateException("no keystore")
-            return prefix + Base64.encodeToString(plain.toByteArray(), Base64.NO_WRAP)
+            return head(purpose) + Base64.encodeToString(plain.toByteArray(), Base64.NO_WRAP)
         }
 
-        override fun open(sealed: String): String? {
-            if (failToOpen || !sealed.startsWith(prefix)) return null
+        override fun open(purpose: String, sealed: String): String? {
+            val head = head(purpose)
+            if (failToOpen || !sealed.startsWith(head)) return null
             return runCatching {
-                String(Base64.decode(sealed.removePrefix(prefix), Base64.NO_WRAP))
+                String(Base64.decode(sealed.removePrefix(head), Base64.NO_WRAP))
             }.getOrNull()
         }
+
+        private fun head(purpose: String) = prefix + purpose + ":"
     }
 
     @Before
@@ -109,6 +112,17 @@ class SettingsTest {
         box.failToOpen = true
         s.credentials()
         assertFalse(raw().contains(Settings.KEY_CREDENTIALS))
+    }
+
+    @Test
+    fun `a blob sealed for another purpose does not open`() {
+        val box = FakeBox()
+        val s = settings(box)
+        raw().edit().putString(
+            Settings.KEY_CREDENTIALS,
+            box.seal("hijacked", """{"email":"user@example.com","password":"hunter2"}"""),
+        ).commit()
+        assertNull(s.credentials())
     }
 
     @Test

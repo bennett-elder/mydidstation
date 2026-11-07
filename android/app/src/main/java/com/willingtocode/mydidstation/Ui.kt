@@ -1099,9 +1099,12 @@ fun SettingsScreen(container: Container, onDone: () -> Unit) {
                         status = null
                         found = null
                         try {
-                            // Sealing can fail when the device has no usable Keystore, so
-                            // this belongs in the same try as the network call.
-                            container.settings.save(email, password)
+                            // commit() writes synchronously, so it belongs off the main
+                            // thread. Sealing can fail when the device has no usable
+                            // Keystore, so this shares the try with the network call.
+                            withContext(Dispatchers.IO) {
+                                container.settings.save(email, password)
+                            }
                             val count = container.sync.discoverDids()
                             found = count
                             status = if (count == 1) "Found 1 number." else "Found $count numbers."

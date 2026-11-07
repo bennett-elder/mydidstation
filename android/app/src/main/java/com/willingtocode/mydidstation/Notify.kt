@@ -85,6 +85,11 @@ class AndroidNotifier(private val context: Context) : Notifier {
             .setNumber(count)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            // Stated rather than inherited from a zero-initialised field, so a future
+            // edit cannot flip message bodies onto a lock screen by accident. PRIVATE
+            // shows the body unless the user has turned on "hide sensitive content",
+            // which is what messaging apps do by default.
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setAutoCancel(true)
             .setContentIntent(tap)
             .build()

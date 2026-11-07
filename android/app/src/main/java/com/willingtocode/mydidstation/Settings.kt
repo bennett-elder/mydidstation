@@ -43,12 +43,15 @@ class Settings(
             .put(FIELD_EMAIL, email.trim())
             .put(FIELD_PASSWORD, password)
             .toString()
-        prefs.edit().putString(KEY_CREDENTIALS, box.seal(payload)).apply()
+        // commit, not apply: a credential the user just typed should be on disk before
+        // the call returns, and this runs off the main thread. apply would leave a
+        // window in which a kill loses the value the user believes is saved.
+        prefs.edit().putString(KEY_CREDENTIALS, box.seal(PURPOSE, payload)).commit()
     }
 
     override fun credentials(): Pair<String, String>? {
         val sealed = prefs.getString(KEY_CREDENTIALS, null) ?: return null
-        val json = box.open(sealed) ?: return forget()
+        val json = box.open(PURPOSE, sealed) ?: return forget()
         val parsed = runCatching { JSONObject(json) }.getOrNull() ?: return forget()
         val email = parsed.optString(FIELD_EMAIL).takeIf { it.isNotBlank() } ?: return null
         val password = parsed.optString(FIELD_PASSWORD).takeIf { it.isNotEmpty() } ?: return null
@@ -66,7 +69,7 @@ class Settings(
 
     fun email(): String {
         val sealed = prefs.getString(KEY_CREDENTIALS, null) ?: return ""
-        val json = box.open(sealed) ?: return ""
+        val json = box.open(PURPOSE, sealed) ?: return ""
         return runCatching { JSONObject(json).optString(FIELD_EMAIL) }.getOrDefault("")
     }
 
@@ -129,6 +132,9 @@ class Settings(
         const val LEGACY_PREFS = "secure"
 
         const val KEY_CREDENTIALS = "credentials"
+
+        /** Authenticated alongside the blob, so it cannot be opened as some other value. */
+        private const val PURPOSE = "credentials"
 
         private const val FIELD_EMAIL = "email"
         private const val FIELD_PASSWORD = "password"
