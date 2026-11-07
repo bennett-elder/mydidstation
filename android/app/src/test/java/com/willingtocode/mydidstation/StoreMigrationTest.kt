@@ -71,6 +71,12 @@ class StoreMigrationTest {
                          transcription = false)
         store.setDidMailbox("5551234567", "1001")
         assertEquals(1, store.mailboxes().single().dids)
+
+        // v7 adds the per-mailbox coverage marker. A box that has never been filled
+        // reads zero, and the table has to accept a first write.
+        assertEquals(0L, store.voicemailWindowStart("1001"))
+        store.setVoicemailWindowStart("1001", 1_700_000_000L)
+        assertEquals(1_700_000_000L, store.voicemailWindowStart("1001"))
     }
 
     /** The v1 schema as the app first shipped it. */

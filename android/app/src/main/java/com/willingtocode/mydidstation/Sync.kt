@@ -54,6 +54,47 @@ class Sync(
                 listened = it.listened,
             )
         }
+        // Only the first fill sets the floor. A later refresh must not claim the mailbox
+        // is covered further back than it is, and it must not move the floor forward
+        // either, or a load-more would be undone by an ordinary refresh.
+        if (store.voicemailWindowStart(mailbox) == 0L) store.setVoicemailWindowStart(mailbox, from)
+        found.size
+    }
+
+    /** What the next tap of load-more would pull for this mailbox, so the label is honest. */
+    suspend fun voicemailLookBackPlan(mailbox: String): LookBack = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis() / 1000
+        val floor = now - LOOKBACK_FLOOR_SECONDS
+        val covered = store.voicemailWindowStart(mailbox).let { if (it == 0L) now - MAX_RANGE_SECONDS else it }
+        if (covered <= floor) {
+            LookBack(days = 0, more = false)
+        } else {
+            val from = maxOf(covered - MAX_RANGE_SECONDS, floor)
+            LookBack(days = ((covered - from) / DAY_SECONDS).toInt(), more = from > floor)
+        }
+    }
+
+    /** Pulls exactly the window [voicemailLookBackPlan] described. Returns rows fetched. */
+    suspend fun voicemailLookBack(mailbox: String): Int = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis() / 1000
+        val floor = now - LOOKBACK_FLOOR_SECONDS
+        val covered = store.voicemailWindowStart(mailbox).let { if (it == 0L) now - MAX_RANGE_SECONDS else it }
+        if (covered <= floor) return@withContext 0
+        val from = maxOf(covered - MAX_RANGE_SECONDS, floor)
+        val found = api.voicemails(mailbox, fromSec = from, toSec = covered - 1)
+        found.forEach {
+            store.putVoicemail(
+                mailbox = it.mailbox.ifBlank { mailbox },
+                messageNum = it.messageNum,
+                folder = it.folder,
+                date = it.date,
+                callerId = it.callerId,
+                duration = it.duration,
+                urgent = it.urgent,
+                listened = it.listened,
+            )
+        }
+        store.setVoicemailWindowStart(mailbox, from)
         found.size
     }
 

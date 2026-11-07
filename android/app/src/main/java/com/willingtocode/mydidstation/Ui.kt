@@ -444,6 +444,7 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
     // folders when it is marked listened, so the number is not an identity on its own.
     var playing by remember { mutableStateOf<String?>(null) }
     var fetching by remember { mutableStateOf<String?>(null) }
+    var plan by remember { mutableStateOf(LookBack(days = 0, more = false)) }
     val player = remember { VoicemailPlayer() }
 
     // Leaving the screen has to stop the audio. Nothing else owns the player, so without
@@ -459,6 +460,7 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
             status = e.message ?: "could not reach VoIP.ms"
         }
         rows = container.store.voicemails(mailbox)
+        plan = container.sync.voicemailLookBackPlan(mailbox)
         loaded = true
         busy = false
     }
@@ -488,6 +490,22 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
                 status = e.message ?: "could not fetch that recording"
             }
             fetching = null
+        }
+    }
+
+    fun loadOlder() {
+        if (busy) return
+        scope.launch {
+            busy = true
+            try {
+                container.sync.voicemailLookBack(mailbox)
+                rows = container.store.voicemails(mailbox)
+                plan = container.sync.voicemailLookBackPlan(mailbox)
+                status = null
+            } catch (e: Exception) {
+                status = e.message ?: "could not load older recordings"
+            }
+            busy = false
         }
     }
 
@@ -535,6 +553,19 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
                         onClick = { toggle(row) },
                     )
                     HorizontalDivider()
+                }
+                item {
+                    // Same control as the thread screen, deliberately: one window size,
+                    // one label, one behaviour.
+                    if (plan.more) {
+                        TextButton(
+                            onClick = { loadOlder() },
+                            enabled = !busy,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(if (busy) "Loading…" else "Load ${plan.days} more days")
+                        }
+                    }
                 }
             }
         }

@@ -127,6 +127,18 @@ class StoreTest {
     }
 
     @Test
+    fun `a mailbox coverage marker survives a rewrite`() {
+        val store = store()
+        // Never filled and empty are different answers, and zero is the first.
+        assertEquals(0L, store.voicemailWindowStart("1001"))
+        store.setVoicemailWindowStart("1001", 1_700_000_000L)
+        store.setVoicemailWindowStart("1001", 1_600_000_000L)
+        assertEquals(1_600_000_000L, store.voicemailWindowStart("1001"))
+        // Per mailbox, not global.
+        assertEquals(0L, store.voicemailWindowStart("1002"))
+    }
+
+    @Test
     fun `a mailbox with no number pointing at it still lists`() {
         val store = store()
         store.putMailbox("1002", "Unrouted", newCount = 0, urgent = 0, transcription = false)

@@ -112,12 +112,30 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
         db.execSQL("CREATE INDEX message_conv ON message(conversation_id, sent_at)")
         db.execSQL("CREATE INDEX message_did ON message(did, sent_at)")
         createVoicemailTables(db)
+        createVoicemailWindowTable(db)
     }
 
     /**
      * The voicemail tables, in one place so the fresh-install schema and the migration
      * cannot drift apart.
      */
+    /**
+     * How far back each mailbox has been filled.
+     *
+     * A mailbox's coverage cannot be read off the messages it holds: a box with nothing
+     * in the last 30 days has no rows at all, and inferring "we have seen nothing" from
+     * that would hide load-more on exactly the sparse mailbox that needs it. This mirrors
+     * `did.history_start`, which exists for the same reason.
+     */
+    private fun createVoicemailWindowTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE voicemail_window (
+                 mailbox TEXT PRIMARY KEY,
+                 start INTEGER NOT NULL DEFAULT 0
+               )"""
+        )
+    }
+
     private fun createVoicemailTables(db: SQLiteDatabase) {
         db.execSQL(
             """CREATE TABLE mailbox (
@@ -179,6 +197,11 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
             // row can say how many numbers feed it.
             db.execSQL("ALTER TABLE did ADD COLUMN mailbox TEXT NOT NULL DEFAULT ''")
             createVoicemailTables(db)
+        }
+        if (oldVersion < 7) {
+            // v7 remembers how far back each mailbox has been filled, so load-more can
+            // step past the window even when the box returned nothing inside it.
+            createVoicemailWindowTable(db)
         }
     }
 
@@ -379,6 +402,26 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
         writableDatabase.update("did", values, "did = ?", arrayOf(did))
     }
 
+    /** How far back this mailbox has been filled. Zero means never filled. */
+    fun voicemailWindowStart(mailbox: String): Long = synchronized(lock) {
+        readableDatabase
+            .rawQuery("SELECT start FROM voicemail_window WHERE mailbox = ?", arrayOf(mailbox))
+            .use { if (it.moveToFirst()) it.getLong(0) else 0L }
+    }
+
+    fun setVoicemailWindowStart(mailbox: String, start: Long) = synchronized(lock) {
+        val values = ContentValues().apply {
+            put("mailbox", mailbox)
+            put("start", start)
+        }
+        writableDatabase.insertWithOnConflict(
+            "voicemail_window",
+            null,
+            values,
+            SQLiteDatabase.CONFLICT_REPLACE,
+        )
+    }
+
     fun conversationId(did: String, contact: String): Long = synchronized(lock) {
         readableDatabase.rawQuery(
             "SELECT id FROM conversation WHERE did = ? AND contact = ?",
@@ -571,6 +614,6 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
 
     private companion object {
         const val NAME = "mydidstation.db"
-        const val VERSION = 6
+        const val VERSION = 7
     }
 }
