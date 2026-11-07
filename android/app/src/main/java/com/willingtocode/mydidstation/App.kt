@@ -2,6 +2,7 @@ package com.willingtocode.mydidstation
 
 import android.app.Application
 import android.content.Context
+import okhttp3.OkHttpClient
 
 class App : Application() {
 
@@ -30,4 +31,10 @@ class Container(private val context: Context) {
 
     /** Downloaded audio, in the cache directory the OS may empty whenever it likes. */
     val voicemailCache by lazy { VoicemailCache(context.cacheDir) }
+
+    /**
+     * Attachment downloads. One fetcher for the process, so its cache and its byte caps are
+     * the same for every bubble rather than per screen.
+     */
+    val media by lazy { MediaFetcher(OkHttpClient(), context.cacheDir) }
 }

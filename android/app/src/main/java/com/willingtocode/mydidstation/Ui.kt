@@ -728,6 +728,32 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
     }
 }
 
+/**
+ * One attachment, fetched when it comes into view.
+ *
+ * This is what makes the fetcher real on a device: the byte cap, the type sniffing and the
+ * cache all run here, against whatever the server actually sends. Drawing the image is the
+ * next step; until then the line states what arrived, so a failure is legible rather than an
+ * empty space where a picture should be.
+ *
+ * Nothing is downloaded for a bubble that is never shown, which is what keeps a poll that
+ * discovers ten photos from pulling twenty megabytes.
+ */
+@Composable
+private fun AttachmentLine(container: Container, url: String) {
+    var result by remember(url) { mutableStateOf<MediaResult?>(null) }
+    LaunchedEffect(url) { result = container.media.fetch(url) }
+    val label = when (val state = result) {
+        null -> "attachment…"
+        is MediaResult.Loaded -> {
+            val kilobytes = (state.file.length() + 1023) / 1024
+            "${state.type.name.lowercase()} · $kilobytes KB"
+        }
+        is MediaResult.Failed -> state.reason
+    }
+    Text(label, style = MaterialTheme.typography.labelSmall)
+}
+
 @Composable
 private fun VoiceMailItem(
     row: VoiceMailRow,
@@ -1388,11 +1414,7 @@ fun MessagesScreen(
                                         )
                                     }
                                     message.media.forEach { url ->
-                                        // MMS rendering comes next; the URL is real and clickable later.
-                                        Text(
-                                            "[attachment] $url",
-                                            style = MaterialTheme.typography.labelSmall,
-                                        )
+                                        AttachmentLine(container, url)
                                     }
                                     val status = message.carrierStatus.trim().takeIf {
                                         // Only sent messages have a meaningful status. The
