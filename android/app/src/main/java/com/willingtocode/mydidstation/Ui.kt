@@ -1050,6 +1050,30 @@ private fun VoiceMailItem(
     }
 }
 
+/**
+ * The settings the home screen needs, read once and off the main thread.
+ *
+ * Each of these goes through the Keystore: a binder round trip into the key store plus a file
+ * read. Done inside composition, as they were, the first frame waits on hardware, and on a
+ * device with a slow or unhappy Keystore that is an ANR rather than jank.
+ */
+private data class HomeSettings(
+    val hasCredentials: Boolean,
+    val customEndpoint: Boolean,
+    val notificationsEnabled: Boolean,
+    val notifyAsked: Boolean,
+)
+
+private suspend fun readHomeSettings(settings: Settings): HomeSettings =
+    withContext(Dispatchers.IO) {
+        HomeSettings(
+            hasCredentials = settings.credentials() != null,
+            customEndpoint = settings.usingCustomEndpoint(),
+            notificationsEnabled = settings.notificationsEnabled(),
+            notifyAsked = settings.notifyAsked(),
+        )
+    }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DidListScreen(container: Container, onOpen: (String) -> Unit) {
@@ -1059,7 +1083,11 @@ fun DidListScreen(container: Container, onOpen: (String) -> Unit) {
     var rows by remember { mutableStateOf<List<DidRow>>(emptyList()) }
     var refreshing by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
-    val configured = remember { container.settings.credentials() != null }
+    // Read once, off the main thread. Null until it arrives, which is why every use below is
+    // written to tolerate it.
+    var home by remember { mutableStateOf<HomeSettings?>(null) }
+    LaunchedEffect(Unit) { home = readHomeSettings(container.settings) }
+    val configured = home?.hasCredentials == true
 
     val context = LocalContext.current
     val permission = rememberLauncherForActivityResult(
@@ -1080,16 +1108,17 @@ fun DidListScreen(container: Container, onOpen: (String) -> Unit) {
 
     // Asked once, on the first run. A messaging app that silently never notifies
     // reads as broken rather than as quiet, and Android 13 will not ask on its own.
-    LaunchedEffect(Unit) {
+    LaunchedEffect(home) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return@LaunchedEffect
-        val settings = container.settings
-        if (!settings.notificationsEnabled() || settings.notifyAsked()) return@LaunchedEffect
+        val known = home ?: return@LaunchedEffect
+        if (!known.notificationsEnabled || known.notifyAsked) return@LaunchedEffect
         val granted = ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.POST_NOTIFICATIONS,
         ) == PackageManager.PERMISSION_GRANTED
         if (granted) return@LaunchedEffect
-        settings.setNotifyAsked()
+        // One write, off the main thread: it goes through the Keystore like the reads.
+        withContext(Dispatchers.IO) { container.settings.setNotifyAsked() }
         permission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
@@ -1100,7 +1129,7 @@ fun DidListScreen(container: Container, onOpen: (String) -> Unit) {
                     Column {
                         Text("My DID Station")
                         Text(
-                            if (container.settings.usingCustomEndpoint()) {
+                            if (home?.customEndpoint == true) {
                                 "Numbers · not the real API"
                             } else {
                                 "Numbers · VoIP.ms"
@@ -1240,7 +1269,7 @@ fun ConversationsScreen(
     LaunchedEffect(did, resumed) {
         if (!resumed) return@LaunchedEffect
         while (true) {
-            val seconds = container.settings.foregroundSeconds()
+            val seconds = withContext(Dispatchers.IO) { container.settings.foregroundSeconds() }
             if (seconds <= 0) break
             delay(seconds * 1000L)
             val started = System.currentTimeMillis()
@@ -1460,7 +1489,7 @@ fun MessagesScreen(
     LaunchedEffect(did, resumed) {
         if (!resumed) return@LaunchedEffect
         while (true) {
-            val seconds = container.settings.foregroundSeconds()
+            val seconds = withContext(Dispatchers.IO) { container.settings.foregroundSeconds() }
             if (seconds <= 0) break
             delay(seconds * 1000L)
             runCatching { container.sync.refreshDid(did) }
@@ -1838,7 +1867,10 @@ private fun Context.hostActivity(): Activity? {
 @Composable
 fun SettingsScreen(container: Container, onDone: () -> Unit) {
     val scope = rememberCoroutineScope()
-    var email by remember { mutableStateOf(container.settings.email()) }
+    // Seeded from a snapshot read off the main thread. These six values all come out of the
+    // Keystore, so initialising them during composition made the settings screen wait on
+    // hardware before it could draw a single field.
+    var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     // Both fields hold something worth keeping off a shoulder or a screenshot, so
     // they start hidden and each has its own reveal.
@@ -1858,14 +1890,34 @@ fun SettingsScreen(container: Container, onDone: () -> Unit) {
         window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         onDispose { window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
     }
-    var foreground by remember { mutableStateOf(container.settings.foregroundSeconds()) }
-    var background by remember { mutableStateOf(container.settings.backgroundMinutes()) }
-    var endpoint by remember { mutableStateOf(container.settings.endpoint()) }
+    var foreground by remember { mutableStateOf(0) }
+    var background by remember { mutableStateOf(0) }
+    var endpoint by remember { mutableStateOf("") }
     // What the app is actually pointed at. It only changes when an edit is finished, so
     // a poll cannot fire at a half-typed URL.
-    var activeEndpoint by remember { mutableStateOf(container.settings.endpoint()) }
+    var activeEndpoint by remember { mutableStateOf("") }
     var showEndpoint by remember { mutableStateOf(false) }
-    var notifyOn by remember { mutableStateOf(container.settings.notificationsEnabled()) }
+    var notifyOn by remember { mutableStateOf(false) }
+    var settingsLoaded by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        val settings = container.settings
+        val snapshot = withContext(Dispatchers.IO) {
+            listOf(
+                settings.email(),
+                settings.foregroundSeconds().toString(),
+                settings.backgroundMinutes().toString(),
+                settings.endpoint(),
+                settings.notificationsEnabled().toString(),
+            )
+        }
+        email = snapshot[0]
+        foreground = snapshot[1].toInt()
+        background = snapshot[2].toInt()
+        endpoint = snapshot[3]
+        activeEndpoint = snapshot[3]
+        notifyOn = snapshot[4].toBoolean()
+        settingsLoaded = true
+    }
     var notifyAllowed by remember {
         mutableStateOf(
             Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
@@ -1994,10 +2046,19 @@ fun SettingsScreen(container: Container, onDone: () -> Unit) {
                 // default value clears the override. Showing what is in force rather
                 // than what was typed keeps that honest.
                 fun commitEndpoint() {
+                    if (!settingsLoaded) return
                     if (endpoint == activeEndpoint) return
-                    container.settings.setEndpoint(endpoint)
-                    activeEndpoint = container.settings.endpoint()
-                    endpoint = activeEndpoint
+                    // The write and the read-back both go through the Keystore, so neither
+                    // belongs on the thread that is drawing the screen.
+                    val typed = endpoint
+                    scope.launch {
+                        val stored = withContext(Dispatchers.IO) {
+                            container.settings.setEndpoint(typed)
+                            container.settings.endpoint()
+                        }
+                        activeEndpoint = stored
+                        endpoint = stored
+                    }
                 }
                 // Back or leaving the screen can happen without the field losing focus
                 // first, so the edit is written on the way out too. The state below has
