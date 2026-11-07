@@ -333,6 +333,11 @@ fun VoicemailScreen(container: Container, onOpen: (String, String) -> Unit) {
     var busy by remember { mutableStateOf(false) }
     var loaded by remember { mutableStateOf(false) }
 
+    suspend fun loadCached() {
+        rows = withContext(Dispatchers.IO) { container.store.mailboxes() }
+        loaded = true
+    }
+
     suspend fun refresh() {
         busy = true
         status = null
@@ -341,12 +346,18 @@ fun VoicemailScreen(container: Container, onOpen: (String, String) -> Unit) {
         } catch (e: Exception) {
             status = e.message ?: "could not reach VoIP.ms"
         }
-        rows = container.store.mailboxes()
+        rows = withContext(Dispatchers.IO) { container.store.mailboxes() }
         loaded = true
         busy = false
     }
 
-    LaunchedEffect(Unit) { refresh() }
+    // Cached rows first, network after. The mailbox list is one request per screen open,
+    // and waiting for it before drawing made a screen the app already has the data for
+    // feel like it was starting from nothing every time.
+    LaunchedEffect(Unit) {
+        loadCached()
+        refresh()
+    }
 
     Scaffold(
         topBar = {
@@ -445,11 +456,22 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
     var playing by remember { mutableStateOf<String?>(null) }
     var fetching by remember { mutableStateOf<String?>(null) }
     var plan by remember { mutableStateOf(LookBack(days = 0, more = false)) }
+    var paused by remember { mutableStateOf(false) }
+    var playingLabel by remember { mutableStateOf("") }
+    // A recording that will not play is that recording's problem, not the screen's, so the
+    // failure is kept against its own row instead of being shown at the top of the list.
+    var failures by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     val player = remember { VoicemailPlayer() }
 
     // Leaving the screen has to stop the audio. Nothing else owns the player, so without
     // this a recording keeps playing over the mailbox list.
     DisposableEffect(Unit) { onDispose { player.stop() } }
+
+    suspend fun loadCached() {
+        rows = withContext(Dispatchers.IO) { container.store.voicemails(mailbox) }
+        plan = container.sync.voicemailLookBackPlan(mailbox)
+        loaded = true
+    }
 
     suspend fun refresh() {
         busy = true
@@ -459,7 +481,7 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
         } catch (e: Exception) {
             status = e.message ?: "could not reach VoIP.ms"
         }
-        rows = container.store.voicemails(mailbox)
+        rows = withContext(Dispatchers.IO) { container.store.voicemails(mailbox) }
         plan = container.sync.voicemailLookBackPlan(mailbox)
         loaded = true
         busy = false
@@ -470,10 +492,12 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
         if (playing == key) {
             player.stop()
             playing = null
+            paused = false
             return
         }
         player.stop()
         playing = null
+        paused = false
         fetching = key
         scope.launch {
             try {
@@ -483,11 +507,17 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
                     row.folder,
                     row.messageNum,
                 )
-                player.play(file) { if (playing == key) playing = null }
+                player.play(file) {
+                    if (playing == key) {
+                        playing = null
+                        paused = false
+                    }
+                }
                 playing = key
-                status = null
+                playingLabel = row.callerId.ifBlank { "Unknown caller" }
+                failures = failures - key
             } catch (e: Exception) {
-                status = e.message ?: "could not fetch that recording"
+                failures = failures + (key to (e.message ?: "could not fetch that recording"))
             }
             fetching = null
         }
@@ -499,7 +529,7 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
             busy = true
             try {
                 container.sync.voicemailLookBack(mailbox)
-                rows = container.store.voicemails(mailbox)
+                rows = withContext(Dispatchers.IO) { container.store.voicemails(mailbox) }
                 plan = container.sync.voicemailLookBackPlan(mailbox)
                 status = null
             } catch (e: Exception) {
@@ -509,7 +539,10 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
         }
     }
 
-    LaunchedEffect(mailbox) { refresh() }
+    LaunchedEffect(mailbox) {
+        loadCached()
+        refresh()
+    }
 
     Scaffold(
         topBar = {
@@ -527,6 +560,43 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
                     }
                 },
             )
+        },
+        bottomBar = {
+            // Only while something is loaded. Skip buttons are here because a long message
+            // otherwise has to be replayed from the top to hear one part of it again.
+            if (playing != null) {
+                Surface(tonalElevation = 3.dp) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            playingLabel,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f).padding(start = 8.dp),
+                        )
+                        TextButton(onClick = { player.seekBy(-5) }) { Text("−5s") }
+                        TextButton(
+                            onClick = {
+                                if (paused) player.resume() else player.pause()
+                                paused = !paused
+                            },
+                        ) {
+                            Text(if (paused) "Play" else "Pause")
+                        }
+                        TextButton(onClick = { player.seekBy(5) }) { Text("+5s") }
+                        TextButton(
+                            onClick = {
+                                player.stop()
+                                playing = null
+                                paused = false
+                            },
+                        ) {
+                            Text("Stop")
+                        }
+                    }
+                }
+            }
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
@@ -546,10 +616,12 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
                 // moves it from INBOX to Old, so (INBOX, 1) and (Old, 1) can both exist
                 // and a bare number would give the list two identical keys.
                 items(rows, key = { "${it.folder}/${it.messageNum}" }) { row ->
+                    val key = "${row.folder}/${row.messageNum}"
                     VoiceMailItem(
                         row = row,
-                        playing = playing == "${row.folder}/${row.messageNum}",
-                        fetching = fetching == "${row.folder}/${row.messageNum}",
+                        playing = playing == key,
+                        fetching = fetching == key,
+                        failure = failures[key],
                         onClick = { toggle(row) },
                     )
                     HorizontalDivider()
@@ -577,6 +649,7 @@ private fun VoiceMailItem(
     row: VoiceMailRow,
     playing: Boolean,
     fetching: Boolean,
+    failure: String?,
     onClick: () -> Unit,
 ) {
     Column(
@@ -593,8 +666,9 @@ private fun VoiceMailItem(
             )
             Text(
                 when {
-                    fetching -> "Loading…"
+                    fetching -> "Downloading…"
                     playing -> "Playing…"
+                    failure != null -> "Can't play"
                     else -> row.duration
                 },
                 style = MaterialTheme.typography.bodyMedium,
@@ -609,6 +683,13 @@ private fun VoiceMailItem(
             },
             style = MaterialTheme.typography.bodySmall,
         )
+        if (failure != null) {
+            Text(
+                failure,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
         if (row.transcript.isNotBlank()) {
             Text(row.transcript, style = MaterialTheme.typography.bodyMedium)
         }

@@ -176,13 +176,18 @@ def audio_b64(entry, fmt="mp3", rate=8000, cap_seconds=4):
 
     mp3 unless wav is asked for, because that is what the real API does: its `format`
     parameter defaults to mp3, with wav, wav49 and gsm as the alternatives. The mp3 is a
-    short tone generated once with
+    tone generated once with
 
-        ffmpeg -f lavfi -i 'sine=frequency=440:duration=1.5' -ac 1 -ar 22050 \\
+        ffmpeg -f lavfi -i 'sine=frequency=440:duration=12' -ac 1 -ar 22050 \\
                -b:a 24k -y tools/voicemail_tone.mp3
 
-    and kept as a file rather than a base64 literal so this source stays readable. The
-    wav branch synthesises its tone, which needs no encoder.
+    and kept as a file rather than a base64 literal so this source stays readable. Twelve
+    seconds because the shortest seeded message is six: a fixture shorter than the
+    duration the same row advertises made seek look broken when it was working, since
+    there was nothing left to seek into. The seeded durations stay as they are because
+    they are metadata the app displays, not a description of this file.
+
+    The wav branch synthesises its tone, which needs no encoder.
     """
     if fmt == "mp3" and VOICEMAIL_MP3.exists():
         return base64.b64encode(VOICEMAIL_MP3.read_bytes()).decode()

@@ -114,6 +114,34 @@ class VoicemailPlayer {
         player = created
     }
 
+    fun pause() {
+        player?.let { if (it.isPlaying) it.pause() }
+    }
+
+    fun resume() {
+        player?.let { if (!it.isPlaying) it.start() }
+    }
+
+    fun isPaused(): Boolean = player?.let { !it.isPlaying } ?: false
+
+    /**
+     * Moves by [seconds] from where it is, clamped to the recording.
+     *
+     * Long recordings are the reason this exists: scrubbing a two minute message by
+     * replaying it from the top is not a usable thing to ask of anyone.
+     */
+    fun seekBy(seconds: Int) {
+        val current = player ?: return
+        val duration = runCatching { current.duration }.getOrDefault(0)
+        if (duration <= 0) return
+        val target = (current.currentPosition + seconds * 1000).coerceIn(0, duration)
+        current.seekTo(target)
+    }
+
+    fun durationMs(): Int = player?.let { runCatching { it.duration }.getOrDefault(0) } ?: 0
+
+    fun positionMs(): Int = player?.let { runCatching { it.currentPosition }.getOrDefault(0) } ?: 0
+
     fun stop() {
         player?.let {
             runCatching { if (it.isPlaying) it.stop() }
