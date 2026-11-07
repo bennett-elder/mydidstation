@@ -174,17 +174,22 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
      * but marked hidden, so it disappears from the list without losing whatever
      * history it already had, and it comes back if SMS is enabled again.
      */
-    fun putDid(did: String, hidden: Boolean = false) = synchronized(lock) {
+    fun putDid(did: String, hidden: Boolean = false, mailbox: String = "") = synchronized(lock) {
         val flag = if (hidden) 1 else 0
         val values = ContentValues().apply {
             put("did", did)
             put("enabled", 0)
             put("hidden", flag)
+            put("mailbox", mailbox)
         }
         writableDatabase.insertWithOnConflict("did", null, values, SQLiteDatabase.CONFLICT_IGNORE)
-        // Existing rows must not lose their enrolled state, but the flag can change
-        // as the account is reconfigured, so patch that column alone.
-        val patch = ContentValues().apply { put("hidden", flag) }
+        // Existing rows must not lose their enrolled state, but the rest can change as the
+        // account is reconfigured, so patch those columns alone. The mailbox is patched
+        // even when empty: the API is the authority on where a number routes.
+        val patch = ContentValues().apply {
+            put("hidden", flag)
+            put("mailbox", mailbox)
+        }
         writableDatabase.update("did", patch, "did = ?", arrayOf(did))
     }
 

@@ -48,9 +48,16 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.Phone
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -178,11 +185,18 @@ fun MyDidStationTheme(content: @Composable () -> Unit) {
     MaterialTheme(content = content)
 }
 
+/** Where the Texts tab is. It is the only stack with depth so far. */
 sealed interface Screen {
     data object Dids : Screen
     data class Convs(val did: String) : Screen
     data class Msgs(val did: String, val convId: Long, val contact: String) : Screen
-    data object Settings : Screen
+}
+
+/** The app's top-level places. Each keeps its own stack, so Back stays inside a tab. */
+enum class Tab(val label: String) {
+    Texts("Texts"),
+    Voicemail("Voicemail"),
+    Settings("Settings"),
 }
 
 /** A conversation a notification wants opened, as read from the intent. */
@@ -190,68 +204,200 @@ data class Target(val did: String, val contact: String)
 
 @Composable
 fun Root(container: Container, open: Target? = null, onConsumed: () -> Unit = {}) {
-    // A notification tap starts at the thread it is about, rather than flashing
-    // the numbers list on the way.
+    var tab by remember { mutableStateOf(Tab.Texts) }
+    // A notification tap starts at the thread it is about, rather than flashing the
+    // numbers list on the way.
     var screen by remember {
         mutableStateOf<Screen>(
             open?.let { Screen.Msgs(it.did, 0L, it.contact) } ?: Screen.Dids,
         )
     }
 
+    // The thread lives in the Texts stack, so the tab has to be selected as well or it
+    // would open behind whichever tab was showing.
     LaunchedEffect(open) {
         if (open != null) {
+            tab = Tab.Texts
             screen = Screen.Msgs(open.did, 0L, open.contact)
             onConsumed()
         }
     }
 
-    when (val current = screen) {
-        Screen.Dids -> {
-            BackHandler(enabled = false) {}
-            DidListScreen(
-                container = container,
-                onOpen = { screen = Screen.Convs(it) },
-                onSettings = { screen = Screen.Settings },
-            )
-        }
+    Scaffold(
+        bottomBar = {
+            NavigationBar {
+                NavigationBarItem(
+                    selected = tab == Tab.Texts,
+                    onClick = { tab = Tab.Texts },
+                    icon = { Icon(Icons.Filled.Email, contentDescription = null) },
+                    label = { Text(Tab.Texts.label) },
+                )
+                NavigationBarItem(
+                    selected = tab == Tab.Voicemail,
+                    onClick = { tab = Tab.Voicemail },
+                    icon = { Icon(Icons.Filled.Phone, contentDescription = null) },
+                    label = { Text(Tab.Voicemail.label) },
+                )
+                NavigationBarItem(
+                    selected = tab == Tab.Settings,
+                    onClick = { tab = Tab.Settings },
+                    icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
+                    label = { Text(Tab.Settings.label) },
+                )
+            }
+        },
+    ) { padding ->
+        Box(Modifier.padding(padding)) {
+            when (tab) {
+                Tab.Texts -> when (val current = screen) {
+                    Screen.Dids -> {
+                        BackHandler(enabled = false) {}
+                        DidListScreen(
+                            container = container,
+                            onOpen = { screen = Screen.Convs(it) },
+                        )
+                    }
 
-        is Screen.Convs -> {
-            BackHandler { screen = Screen.Dids }
-            ConversationsScreen(
-                container = container,
-                did = current.did,
-                onBack = { screen = Screen.Dids },
-                onOpen = { convId, contact -> screen = Screen.Msgs(current.did, convId, contact) },
-                onNew = { screen = Screen.Msgs(current.did, 0L, "") },
-            )
-        }
+                    is Screen.Convs -> {
+                        BackHandler { screen = Screen.Dids }
+                        ConversationsScreen(
+                            container = container,
+                            did = current.did,
+                            onBack = { screen = Screen.Dids },
+                            onOpen = { convId, contact ->
+                                screen = Screen.Msgs(current.did, convId, contact)
+                            },
+                            onNew = { screen = Screen.Msgs(current.did, 0L, "") },
+                        )
+                    }
 
-        is Screen.Msgs -> {
-            // Keyed, because a notification tap can go from one thread straight to
-            // another. Without this the screen keeps the previous conversation's
-            // remembered state and shows the wrong messages.
-            key(current.did, current.convId, current.contact) {
-                BackHandler { screen = Screen.Convs(current.did) }
-                MessagesScreen(
-                    container = container,
-                    did = current.did,
-                    conversationId = current.convId,
-                    contact = current.contact,
-                    onBack = { screen = Screen.Convs(current.did) },
+                    is Screen.Msgs -> {
+                        // Keyed, because a notification tap can go from one thread straight
+                        // to another, and the screen would otherwise keep the previous
+                        // conversation's remembered state and show the wrong messages.
+                        key(current.did, current.convId, current.contact) {
+                            BackHandler { screen = Screen.Convs(current.did) }
+                            MessagesScreen(
+                                container = container,
+                                did = current.did,
+                                conversationId = current.convId,
+                                contact = current.contact,
+                                onBack = { screen = Screen.Convs(current.did) },
+                            )
+                        }
+                    }
+                }
+
+                Tab.Voicemail -> VoicemailScreen(container)
+
+                Tab.Settings -> SettingsScreen(container, onDone = { tab = Tab.Texts })
+            }
+        }
+    }
+}
+
+/**
+ * Mailboxes, not numbers. A box can be fed by several numbers or by none, so this list
+ * comes from getVoicemails and never from the DID list.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun VoicemailScreen(container: Container) {
+    val scope = rememberCoroutineScope()
+    var rows by remember { mutableStateOf<List<MailboxRow>>(emptyList()) }
+    var status by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var loaded by remember { mutableStateOf(false) }
+
+    suspend fun refresh() {
+        busy = true
+        status = null
+        try {
+            container.sync.refreshMailboxes()
+        } catch (e: Exception) {
+            status = e.message ?: "could not reach VoIP.ms"
+        }
+        rows = container.store.mailboxes()
+        loaded = true
+        busy = false
+    }
+
+    LaunchedEffect(Unit) { refresh() }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Voicemail") },
+                actions = {
+                    TextButton(onClick = { scope.launch { refresh() } }, enabled = !busy) {
+                        Text(if (busy) "Checking…" else "Refresh")
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        Column(Modifier.padding(padding).fillMaxSize()) {
+            status?.let {
+                Text(
+                    it,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            if (loaded && rows.isEmpty()) {
+                Text(
+                    "No mailboxes yet. They appear once the account reports them.",
+                    modifier = Modifier.padding(16.dp),
+                )
+            }
+            LazyColumn(Modifier.fillMaxSize()) {
+                items(rows, key = { it.mailbox }) { row ->
+                    MailboxRowItem(row)
+                    HorizontalDivider()
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MailboxRowItem(row: MailboxRow) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                row.name.ifBlank { "Mailbox ${row.mailbox}" },
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.weight(1f),
+            )
+            if (row.newCount > 0) {
+                Text(
+                    if (row.newCount == 1) "1 new" else "${row.newCount} new",
+                    style = MaterialTheme.typography.titleMedium,
                 )
             }
         }
-
-        Screen.Settings -> {
-            BackHandler { screen = Screen.Dids }
-            SettingsScreen(container = container, onDone = { screen = Screen.Dids })
-        }
+        Text(
+            buildString {
+                append("Mailbox ")
+                append(row.mailbox)
+                // Numbers, plural: a box is fed by however many are routed to it, and zero
+                // is a normal state rather than a bug.
+                when (row.dids) {
+                    0 -> append(" · no number routed")
+                    1 -> append(" · 1 number")
+                    else -> append(" · ${row.dids} numbers")
+                }
+                if (row.transcription) append(" · transcriptions on")
+            },
+            style = MaterialTheme.typography.bodySmall,
+        )
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DidListScreen(container: Container, onOpen: (String) -> Unit, onSettings: () -> Unit) {
+fun DidListScreen(container: Container, onOpen: (String) -> Unit) {
     val scope = rememberCoroutineScope()
     val time = rememberTimeStyle()
     val now = System.currentTimeMillis() / 1000
@@ -308,7 +454,6 @@ fun DidListScreen(container: Container, onOpen: (String) -> Unit, onSettings: ()
                         )
                     }
                 },
-                actions = { TextButton(onClick = onSettings) { Text("Settings") } },
             )
         },
     ) { padding ->

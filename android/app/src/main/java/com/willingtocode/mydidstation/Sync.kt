@@ -23,8 +23,36 @@ class Sync(
     /** Records every number the account reports, returning how many are usable. */
     suspend fun discoverDids(): Int = withContext(Dispatchers.IO) {
         val found = api.discoverDids()
-        found.forEach { store.putDid(it.did, hidden = !it.smsEnabled) }
+        found.forEach {
+            store.putDid(it.did, hidden = !it.smsEnabled, mailbox = it.mailbox)
+        }
         found.count { it.smsEnabled }
+    }
+
+    /**
+     * Refreshes the mailbox list. One call: getVoicemails is the only method that
+     * enumerates mailboxes, and a mailbox exists independently of any number.
+     *
+     * Messages are not fetched here. Opening a mailbox does that, the same way opening a
+     * number is what fetches its texts (D8).
+     */
+    suspend fun refreshMailboxes(): Int = withContext(Dispatchers.IO) {
+        // The number-to-mailbox mapping comes from getDIDsInfo, which discovery already
+        // reads, and nothing else refreshes it. Doing that here is what keeps a mailbox's
+        // "N numbers" honest without making the user go through Settings after the account
+        // is reconfigured, and it costs one request.
+        discoverDids()
+        val found = api.mailboxes()
+        found.forEach {
+            store.putMailbox(
+                mailbox = it.mailbox,
+                name = it.name,
+                newCount = it.newCount,
+                urgent = it.urgent,
+                transcription = it.transcription,
+            )
+        }
+        found.size
     }
 
     /** Returns the number of messages that were new to us. */

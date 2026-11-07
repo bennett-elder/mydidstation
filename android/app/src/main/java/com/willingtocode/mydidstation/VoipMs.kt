@@ -17,7 +17,7 @@ import java.util.concurrent.TimeUnit
 class ApiException(val status: String) : Exception("VoIP.ms returned status=$status")
 
 /** One number the account reports, and whether the account can message on it. */
-data class DiscoveredDid(val did: String, val smsEnabled: Boolean)
+data class DiscoveredDid(val did: String, val smsEnabled: Boolean, val mailbox: String)
 
 data class RemoteMsg(
     val remoteId: Long,
@@ -105,7 +105,10 @@ class VoipMs(private val settings: ApiSettings) {
             // Absent means the API did not say, which is treated as enabled so a
             // shape change cannot silently hide every number.
             val enabled = row.optString("sms_enabled", "1").trim().lowercase()
-            out.add(DiscoveredDid(did, enabled != "0" && enabled != "false"))
+            // The voicemail this number is routed to. Not unique and not required: several
+            // numbers can share a mailbox, and a mailbox can have none.
+            val mailbox = row.optString("voicemail").trim()
+            out.add(DiscoveredDid(did, enabled != "0" && enabled != "false", mailbox))
         }
         return out
     }
