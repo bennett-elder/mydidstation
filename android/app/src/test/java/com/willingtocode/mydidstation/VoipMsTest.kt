@@ -273,6 +273,60 @@ class VoipMsTest {
     }
 
     @Test
+    fun `awkward base64 still decodes`() {
+        // Bytes chosen so the standard encoding contains both + and /, which are the
+        // characters that turn into - and _ in the URL-safe alphabet.
+        val bytes = byteArrayOf(0xFB.toByte(), 0xFF.toByte(), 0xFE.toByte(), 0x3E, 0x7F, 0x2B)
+        val standard = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+        assertTrue("test bytes should exercise + and /", standard.any { it == '+' || it == '/' })
+
+        val api = api()
+        val withNewlines = standard.chunked(4).joinToString("\n")
+        assertTrue(
+            "wrapped base64 did not decode",
+            bytes.contentEquals(api.decodeAudio(withNewlines)),
+        )
+        assertTrue(
+            "URL-safe base64 did not decode",
+            bytes.contentEquals(api.decodeAudio(standard.replace('+', '-').replace('/', '_'))),
+        )
+        assertTrue(
+            "unpadded base64 did not decode",
+            bytes.contentEquals(api.decodeAudio(standard.trimEnd('='))),
+        )
+        assertTrue(
+            "base64 with spaces did not decode",
+            bytes.contentEquals(api.decodeAudio(standard.chunked(2).joinToString(" "))),
+        )
+    }
+
+    @Test
+    fun `base64 that cannot be base64 says how much arrived`() {
+        // A length congruent to 1 mod 4 cannot be whole bytes whatever padding is added,
+        // and that is the shape the platform's decoder rejects. The stray-character count
+        // is reported because the decoder otherwise skips them without a word.
+        val failure = runCatching { api().decodeAudio("AAAAA") }.exceptionOrNull()
+        assertNotNull("an impossible length has to fail", failure)
+        val text = failure?.message.orEmpty()
+        assertTrue("length missing from '$text'", text.contains("5 characters"))
+        assertTrue("stray count missing from '$text'", text.contains("0 outside the alphabet"))
+
+        assertNotNull(runCatching { api().decodeAudio("") }.exceptionOrNull())
+    }
+
+    @Test
+    fun `a stray character does not poison a good payload`() {
+        val api = api()
+        val clean = byteArrayOf(0x49, 0x44, 0x33)
+        val encoded = android.util.Base64.encodeToString(clean, android.util.Base64.NO_WRAP)
+        val polluted = encoded.replace("I", "I\u0000\u4e2d")
+        assertTrue(
+            "junk characters should be dropped, not fatal",
+            clean.contentEquals(api.decodeAudio(polluted)),
+        )
+    }
+
+    @Test
     fun `an empty success names the request and the fields it did get`() = runBlocking {
         // Not a shape the API sends, but the failure mode that hid a real bug for two
         // releases: a success with nothing where the parser looks used to say

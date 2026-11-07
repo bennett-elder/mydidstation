@@ -271,9 +271,36 @@ class VoipMs(private val settings: ApiSettings) {
         requireSuccess(json)
         val data = firstData(json, mailbox, folder, messageNum)
         if (!audioLengthAllowed(data.length)) throw ApiException("audio_too_large")
-        val bytes = Base64.decode(data, Base64.DEFAULT)
+        val bytes = decodeAudio(data)
         if (bytes.size > MAX_AUDIO_BYTES) throw ApiException("audio_too_large")
         return bytes
+    }
+
+    /**
+     * Decodes the audio, coping with the base64 variants a real account has sent.
+     *
+     * `Base64.DEFAULT` alone threw "bad base-64" on some recordings. The decoder is
+     * lenient in one direction and strict in another: it silently skips characters outside
+     * the alphabet, and it throws only when the length cannot be a whole number of bytes.
+     * So the payload is stripped to the alphabet first, which keeps a stray character from
+     * corrupting an otherwise good recording, and the failure reports the length and how
+     * much was discarded rather than repeating "bad base-64".
+     */
+    internal fun decodeAudio(raw: String): ByteArray {
+        val cleaned = raw.filterNot { it.isWhitespace() }
+        if (cleaned.isEmpty()) throw ApiException("the audio payload was empty")
+        val standard = cleaned.replace('-', '+').replace('_', '/')
+        val stray = standard.count { it !in BASE64_ALPHABET }
+        val usable = standard.filter { it in BASE64_ALPHABET }
+        val padded = usable + "=".repeat((4 - usable.length % 4) % 4)
+        return try {
+            Base64.decode(padded, Base64.NO_WRAP)
+        } catch (e: IllegalArgumentException) {
+            throw ApiException(
+                "the audio is not base64 (${usable.length} characters, " +
+                    "$stray outside the alphabet)",
+            )
+        }
     }
 
     /**
@@ -368,6 +395,10 @@ class VoipMs(private val settings: ApiSettings) {
 
         /** Encoded is about a third larger, so the pre-decode check has to be wider. */
         private const val MAX_AUDIO_BASE64_CHARS = 12 * 1024 * 1024
+
+        /** The standard alphabet plus padding. Anything else is what breaks a decode. */
+        private const val BASE64_ALPHABET =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
 
         fun normalizePhone(raw: String): String {
             val digits = raw.filter { it.isDigit() }
