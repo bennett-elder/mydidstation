@@ -33,8 +33,18 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+      # First-party caching instead of gradle/actions/setup-gradle. The distribution itself
+      # is verified by distributionSha256Sum in gradle-wrapper.properties, which is the
+      # wrapper's own check and needs no action to run it.
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/gradle/wrapper/gradle-wrapper.properties', 'android/**/*.gradle.kts') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
 
       # Robolectric fetches its Android image into ~/.m2 at test time, which the
       # Gradle cache above does not cover. One image, pinned in
@@ -102,6 +112,13 @@ jobs:
             echo "apk=app/build/outputs/apk/debug/app-debug.apk" >> "$GITHUB_OUTPUT"
           fi
 
+      # Key material only the signing step needs. Removed as soon as it has been used, and
+      # on failure too, so it does not sit on the runner while the artifact is uploaded and
+      # the release is published.
+      - name: Remove the keystore
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/release.keystore"
+
       - name: Name the APK and checksum it
         id: apk
         run: |
@@ -135,26 +152,39 @@ jobs:
 
       - name: Publish release
         if: ${{ github.event_name == 'push' || inputs.create_release }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.version.outputs.BUILD_NAME }}
-          name: ${{ steps.version.outputs.BUILD_NAME }}
-          files: ${{ steps.apk.outputs.path }}
-          prerelease: ${{ steps.version.outputs.PRERELEASE == 'true' }}
-          make_latest: true
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          body: |
-            My DID Station ${{ steps.version.outputs.BUILD_NAME }}.
+        # gh is preinstalled on GitHub-hosted runners, so publishing needs no third-party
+        # action and nothing to pin. This replaces softprops/action-gh-release, which was
+        # the only unowned code in this file.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ steps.version.outputs.BUILD_NAME }}
+          NAME: ${{ steps.version.outputs.BUILD_NAME }}
+          APK: ${{ steps.apk.outputs.path }}
+          SHA256: ${{ steps.apk.outputs.sha }}
+          VERSION_CODE: ${{ steps.version.outputs.BUILD_NUMBER }}
+          PRERELEASE: ${{ steps.version.outputs.PRERELEASE }}
+          SIGNED: ${{ steps.keystore.outputs.signed }}
+        run: |
+          set -euo pipefail
+          if [ "$SIGNED" = "true" ]; then signing="the release key"; else signing="the debug key"; fi
+          cat > "$RUNNER_TEMP/notes.md" <<NOTES
+          My DID Station $NAME.
 
-            - Commit: ${{ github.sha }}
-            - Triggered by: ${{ github.triggering_actor }}
-            - Signed with: ${{ steps.keystore.outputs.signed == 'true' && 'the release key' || 'the debug key' }}
-            - SHA-256: `${{ steps.apk.outputs.sha }}`
+          - Commit: $GITHUB_SHA
+          - Triggered by: ${GITHUB_TRIGGERING_ACTOR:-$GITHUB_ACTOR}
+          - Signed with: $signing
+          - SHA-256: $SHA256
 
-            versionCode is `${{ steps.version.outputs.BUILD_NUMBER }}`, so a newer
-            build always installs over an older one. Point Obtainium at this
-            repository and turn on prereleases.
+          versionCode is $VERSION_CODE, so a newer build always installs over an older
+          one. Point Obtainium at this repository and turn on prereleases.
 
-            Version scheme: see `scripts/version.sh`. The committed
-            `android/version.properties` is what F-Droid builds.
+          Version scheme: see scripts/version.sh. The committed
+          android/version.properties is what F-Droid builds.
+          NOTES
+          flags=(--title "$NAME" --notes-file "$RUNNER_TEMP/notes.md" --generate-notes --latest)
+          if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+          # A tag build already has its tag. A branch push still has to create one, and it
+          # has to point at the commit that was just built.
+          if [ "${GITHUB_REF_TYPE:-}" != "tag" ]; then flags+=(--target "$GITHUB_SHA"); fi
+          gh release create "$TAG" "$APK" "${flags[@]}"
+
