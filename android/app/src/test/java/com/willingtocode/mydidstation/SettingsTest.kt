@@ -187,9 +187,21 @@ class SettingsTest {
     fun `the old encrypted file is discarded`() {
         context.getSharedPreferences(Settings.LEGACY_PREFS, Context.MODE_PRIVATE)
             .edit().putString("api_password", "ciphertext").commit()
-        settings()
+        // Constructing alone must not do file work, so the cleanup is its own call now.
+        val settings = settings()
+        assertFalse(
+            "construction must not delete anything",
+            context.getSharedPreferences(Settings.LEGACY_PREFS, Context.MODE_PRIVATE).all.isEmpty(),
+        )
+        settings.migrateLegacy()
         val left = context.getSharedPreferences(Settings.LEGACY_PREFS, Context.MODE_PRIVATE)
         assertTrue(left.all.isEmpty())
+    }
+
+    @Test
+    fun `the legacy cleanup can run twice`() {
+        settings().migrateLegacy()
+        settings().migrateLegacy()
     }
 
     @Test

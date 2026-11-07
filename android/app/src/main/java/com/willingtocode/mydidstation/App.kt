@@ -2,6 +2,7 @@ package com.willingtocode.mydidstation
 
 import android.app.Application
 import android.content.Context
+import kotlin.concurrent.thread
 import okhttp3.OkHttpClient
 
 class App : Application() {
@@ -12,6 +13,10 @@ class App : Application() {
     override fun onCreate() {
         super.onCreate()
         container = Container(this)
+        // The legacy prefs cleanup that used to happen inside the Settings constructor. It
+        // creates and reads no key, but it is file work, and app start is the one place where
+        // file work on the main thread turns into a visible stall.
+        thread(name = "legacy-settings") { container.settings.migrateLegacy() }
         // The channel has to exist before the first notification, and creating it
         // is idempotent, so app start is the simplest place to guarantee it.
         container.notifier.ensureChannel()

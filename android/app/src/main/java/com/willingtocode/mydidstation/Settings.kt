@@ -31,9 +31,16 @@ class Settings(
 
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    init {
-        // The old EncryptedSharedPreferences ciphertext cannot be opened without the key
-        // that library owned, so the file goes and the credentials get asked for once.
+    /**
+     * Deletes the preference file an earlier version left behind.
+     *
+     * The old EncryptedSharedPreferences ciphertext cannot be opened without the key that
+     * library owned, so the file goes and the credentials get asked for once. This used to
+     * run in the constructor: a side effect in construction, on whatever thread first
+     * touched the settings, where an I/O fault would have stopped the app from starting.
+     * It is idempotent and safe to call on every launch.
+     */
+    fun migrateLegacy() {
         runCatching { context.deleteSharedPreferences(LEGACY_PREFS) }
     }
 
