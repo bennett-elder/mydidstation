@@ -66,6 +66,16 @@ sealed interface MediaResult {
 
     /** No file was kept. [reason] is meant to be shown to a person. */
     data class Failed(val reason: String) : MediaResult
+
+    /**
+     * The server answered, and the answer contained no media.
+     *
+     * Kept apart from [Failed] because a retry cannot help. A voice note sent through the
+     * real account comes back this way: HTTP 200, `text/html`, zero bytes, while pictures
+     * sent the same way arrive intact, and the vendor's own web view shows the message with
+     * nothing in it. The bytes were never stored, so asking again only makes the row flicker.
+     */
+    data class Unavailable(val reason: String) : MediaResult
 }
 
 /**
@@ -93,6 +103,15 @@ class MediaFetcher(
 
     /** One lock per URL, so duplicate attachments on screen share a single download. */
     private val locks = ConcurrentHashMap<String, Mutex>()
+
+    /**
+     * URLs that came back with nothing in them.
+     *
+     * Only for the life of the process: the vendor might store a recording properly later,
+     * and a failure remembered on disk would outlive the reason for it. This is enough to
+     * stop a conversation re-asking every time it is opened.
+     */
+    private val empty = ConcurrentHashMap.newKeySet<String>()
 
     private fun key(url: String): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(url.toByteArray())
@@ -122,6 +141,7 @@ class MediaFetcher(
 
     suspend fun fetch(url: String): MediaResult = withContext(Dispatchers.IO) {
         cached(url)?.let { return@withContext it }
+        if (key(url) in empty) return@withContext MediaResult.Unavailable(NOTHING_STORED)
         // One download at a time per URL. Two bubbles can show the same attachment, and
         // without this they race on the same file and one of them loses the rename.
         val mutex = locks.computeIfAbsent(key(url)) { Mutex() }
@@ -153,12 +173,7 @@ class MediaFetcher(
                 // session, a referer or a credential it did not get, and the status alone does
                 // not say so. Naming the status, the type and the length is what turns this
                 // from "empty" into something diagnosable from the phone.
-                if (response.body.contentLength() == 0L) {
-                    val kind = response.header("Content-Type") ?: "no type"
-                    return MediaResult.Failed(
-                        "empty attachment (HTTP ${response.code}, $kind, 0 bytes)",
-                    )
-                }
+                if (response.body.contentLength() == 0L) return nothingStored(url)
                 response.body.byteStream().use { stream -> store(url, stream) }
             }
         } catch (e: IOException) {
@@ -166,10 +181,18 @@ class MediaFetcher(
         }
     }
 
+    /** Records that this URL had no media in it, so nothing asks twice. */
+    private fun nothingStored(url: String): MediaResult {
+        empty.add(key(url))
+        return MediaResult.Unavailable(NOTHING_STORED)
+    }
+
     private fun store(url: String, stream: InputStream): MediaResult {
         val head = ByteArray(SNIFF_BYTES)
         val headLength = readUpTo(stream, head)
-        if (headLength <= 0) return MediaResult.Failed("empty attachment (no bytes arrived)")
+        // Declared no length and then sent nothing. Same answer as a declared zero: the
+        // media is not there, and this is not a fault worth showing as one.
+        if (headLength <= 0) return nothingStored(url)
         val type = sniff(head, headLength) ?: return MediaResult.Failed("unrecognized attachment")
 
         val target = File(dir(), "${key(url)}.${type.extension}")
@@ -368,6 +391,9 @@ class MediaFetcher(
     }
 
     companion object {
+        /** What a person sees for a link that has no media behind it. */
+        private const val NOTHING_STORED = "attachment unavailable"
+
         /** How many bytes are needed to identify the four formats: WebP needs twelve. */
         private const val SNIFF_BYTES = 16
 

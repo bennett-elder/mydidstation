@@ -213,6 +213,37 @@ class MediaFetcherTest {
     }
 
     @Test
+    fun `an empty attachment is called unavailable and asked for once`() = runBlocking {
+        // Exactly what the real account returns for a voice note, images sent the same way
+        // arrive intact.
+        server.enqueue(
+            MockResponse().setHeader("Content-Type", "text/html").setBody("")
+        )
+        val fetcher = fetcher()
+        val first = fetcher.fetch(url("/media/token/media.3gp"))
+        assertTrue(first is MediaResult.Unavailable)
+        assertEquals("attachment unavailable", (first as MediaResult.Unavailable).reason)
+
+        val second = fetcher.fetch(url("/media/token/media.3gp"))
+        assertTrue(second is MediaResult.Unavailable)
+        assertEquals("one request, not two", 1, server.requestCount)
+        assertFalse("nothing may be left on disk", File(root, "mms").listFiles()?.any() ?: false)
+    }
+
+    @Test
+    fun `an expired link is not remembered as unavailable`() = runBlocking {
+        // A 404 can be a link that has not been served yet, so it stays retryable. Only a
+        // successful response with no bytes in it is terminal.
+        server.enqueue(MockResponse().setResponseCode(404))
+        server.enqueue(MockResponse().setBody(Buffer().write(pngBytes)))
+        val fetcher = fetcher()
+        val first = fetcher.fetch(url("/media/gone/media.jpg"))
+        assertEquals("attachment expired", (first as MediaResult.Failed).reason)
+        val second = fetcher.fetch(url("/media/gone/media.jpg"))
+        assertTrue(second is MediaResult.Loaded)
+    }
+
+    @Test
     fun `a second fetch comes off the cache`() = runBlocking {
         server.enqueue(MockResponse().setBody(Buffer().write(pngBytes)))
         val fetcher = fetcher()

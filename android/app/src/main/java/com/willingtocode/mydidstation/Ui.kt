@@ -758,6 +758,9 @@ private fun AttachmentLine(container: Container, url: String) {
         val label = when (val state = result) {
             null -> "attachment…"
             is MediaResult.Failed -> state.reason
+            // Terminal, so there is no ellipsis and nothing to wait for. This is what a voice
+            // note from the real account says: the vendor stored no media behind the link.
+            is MediaResult.Unavailable -> state.reason
             // Only Loaded reaches the branch above, so this is unreachable but harmless.
             is MediaResult.Loaded -> "attachment"
         }
