@@ -6,21 +6,18 @@
 Point the app at it from Settings: long-press the "Sync" heading to reveal the
 endpoint field, then enter http://10.0.2.2:8765/rest.php for an emulator.
 
-A phone on USB reaches it at http://localhost:8765/rest.php after
+A phone cannot reach it from the app as shipped: a release build refuses cleartext to any
+host, and the debug config permits 10.0.2.2 alone, which is the emulator's alias for this
+machine. A phone test needs this machine's LAN address added to
+android/app/src/debug/res/xml/network_security_config.xml.
 
-    adb reverse tcp:8765 tcp:8765
-
-which tunnels the phone's loopback to this machine. That tunnel is the only reason
-localhost appears in the app's network security config. A phone on Wi-Fi would need
-this machine's LAN address added to that config, since localhost there is the phone
-itself.
-
-It answers getDIDsInfo, getMMS, getSMS and sendSMS with the shapes the real API
-uses, and it can be told to misbehave, which is hard to arrange against the real
-thing:
+It answers getDIDsInfo, getMMS, getSMS, sendSMS and the voicemail methods with the shapes
+the real API uses, and it can be told to misbehave, which is hard to arrange against the
+real thing:
 
     curl -s localhost:8765/control/state
     curl -s "localhost:8765/control/inbound?did=5551234567&contact=5551110001&text=hello"
+    curl -s "localhost:8765/control/voicemail?mailbox=1001&callerid=5551110009&duration=00:00:04"
     curl -s "localhost:8765/control/fail?code=522&count=2"
     curl -s "localhost:8765/control/delay?ms=1500"
     curl -s localhost:8765/control/reset
@@ -30,10 +27,15 @@ the terminal while you watch the app.
 """
 
 import argparse
+import base64
+import io
 import json
+import math
 import re
+import struct
 import threading
 import time
+import wave
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -45,6 +47,7 @@ DIDS = [
         "did": "5551234567",
         "description": "Mock main",
         "routing": "account:100001_VoIP",
+        "voicemail": "1001",
         "pop": "16",
         "billing_type": "2",
         "cnam": "1",
@@ -60,6 +63,7 @@ DIDS = [
         "did": "5559876543",
         "description": "Mock side, no SMS on this one",
         "routing": "account:100001_VoIP",
+        "voicemail": "1002",
         "pop": "16",
         "billing_type": "2",
         "cnam": "0",
@@ -68,7 +72,30 @@ DIDS = [
     },
 ]
 
-STATE = {"messages": [], "next_id": 9000, "fail_code": 0, "fail_remaining": 0, "delay_ms": 0}
+# Voicemail mailboxes. A DID points at one through its `voicemail` field, which
+# getDIDsInfo already returns, and every other voicemail method is keyed by mailbox
+# rather than by DID. `password` is in the real getVoicemails payload; the app must
+# ignore it, so the mock serves it too and the parser has to drop it.
+MAILBOXES = [
+    {"mailbox": "1001", "name": "Mock main", "transcription": "yes", "password": "1234"},
+    {"mailbox": "1002", "name": "Mock side", "transcription": "no", "password": "4321"},
+]
+
+# Exactly the fields the documented getVoicemailMessages output carries. Anything else
+# kept here (a transcript, a clock time) is internal and must not leak, or the app would
+# start depending on something the real API never sends.
+VM_FIELDS = ("mailbox", "folder", "message_num", "date", "callerid", "duration",
+             "urgent", "listened")
+
+STATE = {
+    "messages": [],
+    "next_id": 9000,
+    "voicemails": [],
+    "next_vm": 0,
+    "fail_code": 0,
+    "fail_remaining": 0,
+    "delay_ms": 0,
+}
 
 # The vendor doc's own example shows "hello+john", which implies the API urlencodes
 # message text. Whether the live API still does is unconfirmed, so this is a switch
@@ -98,6 +125,62 @@ def add_message(did, contact, text, incoming, carrier_status="Information not av
         return message
 
 
+def public_vm(entry):
+    """The documented shape only, so the app cannot depend on mock-only fields."""
+    return {field: entry[field] for field in VM_FIELDS}
+
+
+def mailbox_row(mailbox):
+    """A getVoicemails row, with counts computed from what is actually stored."""
+    with LOCK:
+        rows = [v for v in STATE["voicemails"] if v["mailbox"] == mailbox["mailbox"]]
+    row = dict(mailbox)
+    row["new"] = sum(1 for v in rows if v["listened"] == "no")
+    row["urgent"] = sum(1 for v in rows if v["urgent"] == "yes")
+    return row
+
+
+def add_voicemail(mailbox, callerid, duration="00:00:05", urgent=False, listened=False,
+                  transcript=None):
+    with LOCK:
+        STATE["next_vm"] += 1
+        now = datetime.now()
+        entry = {
+            "mailbox": mailbox,
+            "folder": "Old" if listened else ("Urgent" if urgent else "INBOX"),
+            "message_num": STATE["next_vm"],
+            "date": now.strftime("%Y-%m-%d"),
+            "callerid": callerid,
+            "duration": duration,
+            "urgent": "yes" if urgent else "no",
+            "listened": "yes" if listened else "no",
+            # Internal. The message list carries a date only, but a transcription
+            # carries a clock time, so one is kept to be able to serve that.
+            "time": now.strftime("%H:%M:%S"),
+            "transcript": transcript,
+        }
+        STATE["voicemails"].append(entry)
+        return entry
+
+
+def audio_b64(entry, rate=8000, cap_seconds=4):
+    """A short WAV tone, so playback has real bytes to hand to a decoder."""
+    seconds = 0
+    for part in entry["duration"].split(":"):
+        seconds = seconds * 60 + int(part)
+    seconds = max(1, min(seconds, cap_seconds))
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(rate)
+        frames = bytearray()
+        for i in range(rate * seconds):
+            frames += struct.pack("<h", int(3000 * math.sin(2 * math.pi * 440 * i / rate)))
+        wav.writeframes(bytes(frames))
+    return base64.b64encode(buf.getvalue()).decode()
+
+
 def seed():
     STATE["messages"] = []
     STATE["next_id"] = 9000
@@ -105,6 +188,12 @@ def seed():
     add_message("5551234567", "5551110001", "second one", incoming=True)
     add_message("5551234567", "5551110001", "replied earlier", incoming=False,
                 carrier_status="delivered")
+    STATE["voicemails"] = []
+    STATE["next_vm"] = 0
+    add_voicemail("1001", "5551110002", duration="00:00:06", transcript="call me back about the invoice")
+    add_voicemail("1001", "5551110003", duration="00:00:03", urgent=True)
+    add_voicemail("1001", "5551110004", duration="00:00:12", listened=True)
+    add_voicemail("1002", "5551110005", duration="00:00:04", transcript="wrong number, sorry")
 
 
 def parse_multipart(body, boundary):
@@ -176,14 +265,30 @@ class Handler(BaseHTTPRequestHandler):
         fields = self.params()
         route = parsed.path.rstrip("/")
         if route == "/control/state":
+            # mailbox_row takes the lock, so it is called before the lock below rather
+            # than inside it: threading.Lock is not reentrant.
+            mailboxes = [mailbox_row(m) for m in MAILBOXES]
             with LOCK:
                 return self.send_json({
                     "dids": DIDS,
                     "messages": STATE["messages"],
+                    "mailboxes": mailboxes,
+                    "voicemails": STATE["voicemails"],
                     "fail_code": STATE["fail_code"],
                     "fail_remaining": STATE["fail_remaining"],
                     "delay_ms": STATE["delay_ms"],
                 })
+        if route == "/control/voicemail":
+            entry = add_voicemail(
+                fields.get("mailbox", MAILBOXES[0]["mailbox"]),
+                fields.get("callerid", "5551110009"),
+                duration=fields.get("duration", "00:00:05"),
+                transcript=fields.get("transcript") or None,
+            )
+            self.log_api(
+                f"control: added voicemail {entry['mailbox']}/{entry['message_num']}"
+            )
+            return self.send_json({"added": public_vm(entry)})
         if route == "/control/inbound":
             message = add_message(
                 fields.get("did", DIDS[0]["did"]),
@@ -274,6 +379,119 @@ class Handler(BaseHTTPRequestHandler):
                                   fields.get("message", ""), incoming=False)
             self.log_api(f"sendSMS did={message['did']} -> id={message['id']}")
             return self.send_json({"status": "success", "sms": message["id"]})
+
+        # Every voicemail call below is keyed by mailbox, not by DID. The DID-to-mailbox
+        # link is the `voicemail` field that getDIDsInfo already returns.
+        if method in ("getVoicemailMessages", "getVoicemailMessageFile",
+                      "markListenedVoicemailMessage", "getVoicemailTranscriptions"):
+            if not fields.get("mailbox"):
+                self.log_api(f"{method}: missing mailbox")
+                return self.send_json({"status": "missing_mailbox"})
+
+        if method == "getVoicemails":
+            wanted = fields.get("mailbox", "")
+            rows = [mailbox_row(m) for m in MAILBOXES
+                    if not wanted or m["mailbox"] == wanted]
+            self.log_api(f"getVoicemails -> {len(rows)} mailbox(es)")
+            if not rows:
+                return self.send_json({"status": "no_mailbox"})
+            return self.send_json({"status": "success", "voicemails": rows})
+
+        if method == "getVoicemailFolders":
+            mailbox = fields.get("mailbox", "")
+            with LOCK:
+                extra = {v["folder"] for v in STATE["voicemails"]
+                         if v["mailbox"] == mailbox}
+            # The default folders exist on an account whether or not anything is filed in
+            # them, so they are always listed and anything else follows.
+            names = ["INBOX", "Urgent", "Old"]
+            names += sorted(extra - set(names))
+            self.log_api(f"getVoicemailFolders mailbox={mailbox} -> {','.join(names)}")
+            return self.send_json({
+                "status": "success",
+                "folders": [{"value": name, "description": name} for name in names],
+            })
+
+        if method == "getVoicemailMessages":
+            mailbox = fields.get("mailbox", "")
+            folder = fields.get("folder", "")
+            date_from = fields.get("date_from", "0000-00-00")
+            date_to = fields.get("date_to", "9999-99-99")
+            with LOCK:
+                rows = [v for v in STATE["voicemails"]
+                        if v["mailbox"] == mailbox
+                        and (not folder or v["folder"] == folder)
+                        and date_from <= v["date"] <= date_to]
+            rows.sort(key=lambda v: (v["date"], v["message_num"]))
+            self.log_api(f"getVoicemailMessages mailbox={mailbox} "
+                         f"folder={folder or '*'} -> {len(rows)} row(s)")
+            return self.send_json({"status": "success",
+                                   "messages": [public_vm(v) for v in rows]})
+
+        if method == "getVoicemailMessageFile":
+            mailbox = fields.get("mailbox", "")
+            folder = fields.get("folder", "")
+            number = str(fields.get("message_num", ""))
+            with LOCK:
+                rows = [v for v in STATE["voicemails"]
+                        if v["mailbox"] == mailbox and v["folder"] == folder
+                        and str(v["message_num"]) == number]
+            self.log_api(f"getVoicemailMessageFile {mailbox}/{folder}/{number} "
+                         f"format={fields.get('format', 'mp3')} -> {len(rows)} row(s)")
+            if not rows:
+                return self.send_json({"status": "message_not_found"})
+            # WAV whatever was asked for: the app asks for wav, and a codec here would
+            # be testing a resampler rather than the app.
+            return self.send_json({"status": "success", "message": [{
+                "mailbox": mailbox,
+                "folder": folder,
+                "message_num": rows[0]["message_num"],
+                "data": audio_b64(rows[0]),
+            }]})
+
+        if method == "markListenedVoicemailMessage":
+            mailbox = fields.get("mailbox", "")
+            folder = fields.get("folder", "")
+            number = str(fields.get("message_num", ""))
+            listened = fields.get("listened", "yes")
+            with LOCK:
+                rows = [v for v in STATE["voicemails"]
+                        if v["mailbox"] == mailbox and v["folder"] == folder
+                        and str(v["message_num"]) == number]
+                if rows:
+                    rows[0]["listened"] = "yes" if listened == "yes" else "no"
+                    # The real API moves the message between INBOX and Old as a side
+                    # effect, which is exactly why (folder, message_num) cannot be the
+                    # app's identity for a message.
+                    rows[0]["folder"] = "Old" if listened == "yes" else "INBOX"
+            self.log_api(f"markListenedVoicemailMessage {mailbox}/{number} "
+                         f"listened={listened} -> "
+                         f"{rows[0]['folder'] if rows else 'not found'}")
+            if not rows:
+                return self.send_json({"status": "message_not_found"})
+            return self.send_json({"status": "success"})
+
+        if method == "getVoicemailTranscriptions":
+            mailbox = fields.get("mailbox", "")
+            folder = fields.get("folder", "")
+            date_from = fields.get("date_from", "0000-00-00")
+            date_to = fields.get("date_to", "9999-99-99")
+            with LOCK:
+                rows = [v for v in STATE["voicemails"]
+                        if v["mailbox"] == mailbox and v["folder"] == folder
+                        and v.get("transcript")
+                        and date_from <= v["date"] <= date_to]
+            self.log_api(f"getVoicemailTranscriptions mailbox={mailbox} "
+                         f"folder={folder} -> {len(rows)} row(s)")
+            # No message_num in this payload: the real response identifies a
+            # transcription by date, caller and duration only.
+            return self.send_json({"status": "success", "messages": [{
+                "date": f"{v['date']} {v['time']}",
+                "callerid": v["callerid"],
+                "duration": v["duration"],
+                "folder": v["folder"],
+                "result": v["transcript"],
+            } for v in rows]})
 
         self.log_api(f"{method}: unknown method")
         return self.send_json({"status": "invalid_method"})
