@@ -117,6 +117,10 @@ VIDEO_CLIP = Path(__file__).with_name("mms_clip.mp4")
 #          -y tools/mms_voice.m4a
 # The -vn is the point: no video track, so the app has to read the box structure to know.
 VOICE_CLIP = Path(__file__).with_name("mms_voice.m4a")
+# Audio-only 3GPP, which is the container an MMS voice note arrives in:
+#   ffmpeg -f lavfi -i 'sine=frequency=700:duration=3' -c:a aac -b:a 48k -vn \
+#          -f 3gp -y tools/mms_voice.3gp
+VOICE_3GP = Path(__file__).with_name("mms_voice.3gp")
 
 STATE = {
     "messages": [],
@@ -384,6 +388,11 @@ class Handler(BaseHTTPRequestHandler):
         if name.startswith("huge"):
             # Enough to prove the cap stops it, without allocating anything clever.
             return self.send_bytes(200, b"\x00" * (24 * 1024 * 1024), "image/png")
+        if name.startswith("voice3gp"):
+            # Audio-only 3GPP, which is what an MMS voice note actually is.
+            if VOICE_3GP.exists():
+                return self.send_bytes(200, VOICE_3GP.read_bytes(), "audio/3gpp")
+            return self.send_bytes(404, b"missing fixture", "text/plain")
         if name.startswith("voice"):
             if VOICE_CLIP.exists():
                 return self.send_bytes(200, VOICE_CLIP.read_bytes(), "audio/mp4")
