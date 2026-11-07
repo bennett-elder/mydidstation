@@ -109,4 +109,30 @@ class StoreTest {
         assertEquals(1_700_000_000L, store.windowEnd("5551234567"))
         assertEquals(1_600_000_000L, store.historyStart("5551234567"))
     }
+
+    @Test
+    fun `a shared mailbox counts every number pointing at it`() {
+        val store = store()
+        store.putDid("5551234567")
+        store.putDid("5559876543")
+        store.setDidMailbox("5551234567", "1001")
+        store.setDidMailbox("5559876543", "1001")
+        store.putMailbox("1001", "Shared", newCount = 2, urgent = 1, transcription = true)
+        val row = store.mailboxes().single()
+        assertEquals("Shared", row.name)
+        assertEquals(2, row.newCount)
+        assertEquals(1, row.urgent)
+        assertTrue(row.transcription)
+        assertEquals(2, row.dids)
+    }
+
+    @Test
+    fun `a mailbox with no number pointing at it still lists`() {
+        val store = store()
+        store.putMailbox("1002", "Unrouted", newCount = 0, urgent = 0, transcription = false)
+        val row = store.mailboxes().single()
+        assertEquals("1002", row.mailbox)
+        assertEquals(0, row.dids)
+        assertFalse(row.transcription)
+    }
 }

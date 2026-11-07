@@ -64,6 +64,13 @@ class StoreMigrationTest {
         assertEquals("hello", message.body)
         assertFalse(message.pending)
         assertEquals("", message.carrierStatus)
+
+        // v6 adds voicemail. The tables have to exist at the end of the chain, and the
+        // existing DID row has to carry the new column rather than fail on it.
+        store.putMailbox("1001", "After migration", newCount = 0, urgent = 0,
+                         transcription = false)
+        store.setDidMailbox("5551234567", "1001")
+        assertEquals(1, store.mailboxes().single().dids)
     }
 
     /** The v1 schema as the app first shipped it. */

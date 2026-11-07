@@ -34,6 +34,16 @@ data class MsgRow(
     val carrierStatus: String,
 )
 
+/** One row per voicemail mailbox, with the counts the mailbox list shows. */
+data class MailboxRow(
+    val mailbox: String,
+    val name: String,
+    val newCount: Int,
+    val urgent: Int,
+    val transcription: Boolean,
+    val dids: Int,
+)
+
 /**
  * Raw SQLite, explicit schema, forward-only migrations, no destructive fallback
  * (DECISIONS.md D3, ARCHITECTURE-LESSONS.md 1.7). Dedupe lives in the schema via
@@ -55,7 +65,8 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
                  hidden INTEGER NOT NULL DEFAULT 0,
                  window_end INTEGER NOT NULL DEFAULT 0,
                  history_start INTEGER NOT NULL DEFAULT 0,
-                 last_remote_id INTEGER
+                 last_remote_id INTEGER,
+                 mailbox TEXT NOT NULL DEFAULT ''
                )"""
         )
         db.execSQL(
@@ -87,6 +98,38 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
         )
         db.execSQL("CREATE INDEX message_conv ON message(conversation_id, sent_at)")
         db.execSQL("CREATE INDEX message_did ON message(did, sent_at)")
+        createVoicemailTables(db)
+    }
+
+    /**
+     * The voicemail tables, in one place so the fresh-install schema and the migration
+     * cannot drift apart.
+     */
+    private fun createVoicemailTables(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE mailbox (
+                 mailbox TEXT PRIMARY KEY,
+                 name TEXT NOT NULL DEFAULT '',
+                 transcription INTEGER NOT NULL DEFAULT 0,
+                 new_count INTEGER NOT NULL DEFAULT 0,
+                 urgent_count INTEGER NOT NULL DEFAULT 0
+               )"""
+        )
+        db.execSQL(
+            """CREATE TABLE voicemail (
+                 mailbox TEXT NOT NULL,
+                 message_num INTEGER NOT NULL,
+                 folder TEXT NOT NULL DEFAULT 'INBOX',
+                 date TEXT NOT NULL DEFAULT '',
+                 callerid TEXT NOT NULL DEFAULT '',
+                 duration TEXT NOT NULL DEFAULT '',
+                 urgent INTEGER NOT NULL DEFAULT 0,
+                 listened INTEGER NOT NULL DEFAULT 0,
+                 transcript TEXT NOT NULL DEFAULT '',
+                 PRIMARY KEY (mailbox, message_num)
+               )"""
+        )
+        db.execSQL("CREATE INDEX voicemail_mailbox ON voicemail(mailbox, folder)")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -116,6 +159,14 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
             // conversations and messages, and a number can be re-enabled later.
             db.execSQL("ALTER TABLE did ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
         }
+        if (oldVersion < 6) {
+            // v6 holds voicemail, which the API keys by mailbox rather than by DID:
+            // several numbers can point at one box, and a box can exist with no number
+            // pointing at it. The column on `did` is reference only, kept so a mailbox
+            // row can say how many numbers feed it.
+            db.execSQL("ALTER TABLE did ADD COLUMN mailbox TEXT NOT NULL DEFAULT ''")
+            createVoicemailTables(db)
+        }
     }
 
     /**
@@ -135,6 +186,58 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
         // as the account is reconfigured, so patch that column alone.
         val patch = ContentValues().apply { put("hidden", flag) }
         writableDatabase.update("did", patch, "did = ?", arrayOf(did))
+    }
+
+    /** Records a mailbox and the counts getVoicemails reports for it. */
+    fun putMailbox(
+        mailbox: String,
+        name: String,
+        newCount: Int,
+        urgent: Int,
+        transcription: Boolean,
+    ) = synchronized(lock) {
+        val values = ContentValues().apply {
+            put("mailbox", mailbox)
+            put("name", name)
+            put("new_count", newCount)
+            put("urgent_count", urgent)
+            put("transcription", if (transcription) 1 else 0)
+        }
+        writableDatabase.insertWithOnConflict(
+            "mailbox", null, values, SQLiteDatabase.CONFLICT_REPLACE,
+        )
+    }
+
+    /** Which mailbox a number is routed to. Several may share one, and none may exist. */
+    fun setDidMailbox(did: String, mailbox: String) = synchronized(lock) {
+        val values = ContentValues().apply { put("mailbox", mailbox) }
+        writableDatabase.update("did", values, "did = ?", arrayOf(did))
+    }
+
+    /** Mailboxes for the voicemail tab, busiest first, with how many numbers feed each. */
+    fun mailboxes(): List<MailboxRow> = synchronized(lock) {
+        val sql = """
+            SELECT b.mailbox, b.name, b.new_count, b.urgent_count, b.transcription,
+                   (SELECT COUNT(*) FROM did d WHERE d.mailbox = b.mailbox) AS dids
+              FROM mailbox b
+             ORDER BY b.new_count DESC, b.mailbox ASC
+        """
+        val out = mutableListOf<MailboxRow>()
+        readableDatabase.rawQuery(sql, null).use { c ->
+            while (c.moveToNext()) {
+                out.add(
+                    MailboxRow(
+                        mailbox = c.getString(0),
+                        name = c.getString(1),
+                        newCount = c.getInt(2),
+                        urgent = c.getInt(3),
+                        transcription = c.getInt(4) == 1,
+                        dids = c.getInt(5),
+                    )
+                )
+            }
+        }
+        out
     }
 
     /** Opening a number enrols it: from here it is polled and its counts shown. */
@@ -394,6 +497,6 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
 
     private companion object {
         const val NAME = "mydidstation.db"
-        const val VERSION = 5
+        const val VERSION = 6
     }
 }
