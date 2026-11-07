@@ -119,6 +119,10 @@ STATE = {
     # real account did for a message that was a single emoji while the by-id call still had
     # it. Off by default because it is a simulation of a vendor quirk, not normal behaviour.
     "strip_list_bodies": False,
+    # When on, getSMS claims to know nothing and getMMS ignores its `sms` filter and answers
+    # with the whole list. That combination is how one message's text ended up stored against
+    # another, and it is not something the normal mock can produce by accident.
+    "sms_by_id_blind": False,
 }
 
 # The vendor doc's own example shows "hello+john", which implies the API urlencodes
@@ -438,6 +442,11 @@ class Handler(BaseHTTPRequestHandler):
                 % STATE["audio_false_remaining"]
             )
             return self.send_json({"count": STATE["audio_false_remaining"]})
+        if route == "/control/sms-by-id-blind":
+            with LOCK:
+                STATE["sms_by_id_blind"] = fields.get("on", "1") not in ("0", "no", "false")
+            self.log_api(f"control: sms_by_id_blind={STATE['sms_by_id_blind']}")
+            return self.send_json({"sms_by_id_blind": STATE["sms_by_id_blind"]})
         if route == "/control/strip-list-bodies":
             with LOCK:
                 STATE["strip_list_bodies"] = fields.get("on", "1") not in ("0", "no", "false")
@@ -450,6 +459,7 @@ class Handler(BaseHTTPRequestHandler):
                 STATE["delay_ms"] = 0
                 STATE["audio_false_remaining"] = 0
                 STATE["strip_list_bodies"] = False
+                STATE["sms_by_id_blind"] = False
             seed()
             self.log_api("control: reset")
             return self.send_json({"reset": True})
@@ -491,6 +501,17 @@ class Handler(BaseHTTPRequestHandler):
             date_from = fields.get("from", "0000-00-00")
             date_to = fields.get("to", "9999-99-99")
             limit = int(fields.get("limit", 100))
+            if STATE["sms_by_id_blind"] and fields.get("sms"):
+                # The fallback ignoring its own filter: the whole list, newest first, which is
+                # what made the first row look like the answer.
+                with LOCK:
+                    rows = list(STATE["messages"])
+                rows.sort(key=lambda m: m["date"], reverse=True)
+                self.log_api(f"getMMS sms={fields['sms']} ignored -> {len(rows)} row(s)")
+                host = self.headers.get("Host", "localhost")
+                return self.send_json({"status": "success", "sms": [
+                    {k: v for k, v in m.items() if k != "media"} for m in rows
+                ]})
             with LOCK:
                 rows = [m for m in STATE["messages"]
                         if m["did"] == did and date_from <= m["date"][:10] <= date_to]
@@ -521,6 +542,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if method == "getSMS":
             wanted = fields.get("sms", "")
+            if STATE["sms_by_id_blind"]:
+                # Pretend not to know the id, so the caller falls through to getMMS.
+                self.log_api(f"getSMS id={wanted} -> blind")
+                return self.send_json({"status": "no_sms"})
             with LOCK:
                 rows = [m for m in STATE["messages"] if str(m["id"]) == str(wanted)]
             self.log_api(f"getSMS id={wanted} -> {len(rows)} row(s)")
