@@ -15,12 +15,42 @@ import java.io.InputStream
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 
-/** The kinds of attachment this app will draw. Anything else is not an image. */
-enum class MediaType(val extension: String) {
-    Png("png"),
-    Jpeg("jpg"),
-    Gif("gif"),
-    Webp("webp"),
+/** What an attachment is, as far as drawing it goes. */
+enum class MediaKind { Image, Audio, Video, Other }
+
+/** The kinds of attachment this app recognises, from the bytes. */
+enum class MediaType(val extension: String, val kind: MediaKind) {
+    Png("png", MediaKind.Image),
+    Jpeg("jpg", MediaKind.Image),
+    Gif("gif", MediaKind.Image),
+    Webp("webp", MediaKind.Image),
+
+    // The MMS audio codecs: AMR is the standard one, and short clips are tens of kilobytes.
+    Amr("amr", MediaKind.Audio),
+    Mp3("mp3", MediaKind.Audio),
+    /**
+     * Deliberately not inline. OGG is rare in MMS, which also means less scrutiny of its
+     * parser; another app can take that risk instead of this process.
+     */
+    Ogg("ogg", MediaKind.Other),
+    /**
+     * Deliberately not inline. MIDI is a score fed to a synthesiser, sonivox has the worst
+     * vulnerability record of the audio parsers, and nobody sends MIDI in an MMS. Handing it
+     * to another app costs the sender nothing and keeps that parser out of this process.
+     */
+    Midi("mid", MediaKind.Other),
+
+    // H.263 in 3gp and MPEG-4 in mp4, which is what carriers transcode video into.
+    ThreeGp("3gp", MediaKind.Video),
+    Mp4("mp4", MediaKind.Video),
+    /**
+     * An MP4 container with no video track: what Google Messages records a voice note as.
+     * The bytes are identical to [Mp4] until the tracks are inspected, so the two are told
+     * apart after the file is written rather than from its header.
+     */
+    M4a("m4a", MediaKind.Audio),
+
+    Pdf("pdf", MediaKind.Other),
 }
 
 /** What fetching one attachment produced. */
@@ -106,7 +136,7 @@ class MediaFetcher(
         val head = ByteArray(SNIFF_BYTES)
         val headLength = readUpTo(stream, head)
         if (headLength <= 0) return MediaResult.Failed("attachment was empty")
-        val type = sniff(head, headLength) ?: return MediaResult.Failed("not an image")
+        val type = sniff(head, headLength) ?: return MediaResult.Failed("unrecognized attachment")
 
         val target = File(dir(), "${key(url)}.${type.extension}")
         // Unique per attempt: two writers of the same URL must not share a temp file, even
@@ -144,8 +174,89 @@ class MediaFetcher(
             if (temp.exists() && temp.length() > MAX_BYTES) temp.delete()
         }
         trim(keep = target)
+        // The container said "mp4"; whether that is a voice note or a video depends on its
+        // tracks, which the header cannot say. Read the box structure ourselves rather than
+        // asking a media parser, so nothing executes on these bytes before the user taps play.
+        if (type == MediaType.Mp4 || type == MediaType.ThreeGp) {
+            if (audioOnlyMp4(target) == true) {
+                val voice = File(target.parentFile, "${key(url)}.${MediaType.M4a.extension}")
+                if (target.renameTo(voice)) return MediaResult.Loaded(voice, MediaType.M4a)
+            }
+        }
         return MediaResult.Loaded(target, type)
     }
+
+    /**
+     * Whether an MP4 holds only audio, read from its box structure.
+     *
+     * True means audio-only, false means it carries video, null means the structure was not
+     * understood and the caller should treat it as video. That default matters: handing the
+     * file to another app is the safer answer when we are unsure.
+     *
+     * `moov` is often the last box rather than the first, because encoders write the media
+     * data and patch the index in afterwards, so this follows the top-level boxes to wherever
+     * `moov` lives instead of scanning the start of the file.
+     */
+    private fun audioOnlyMp4(file: File): Boolean? {
+        val bytes = try {
+            file.readBytes()
+        } catch (e: IOException) {
+            return null
+        }
+        val handlers = mutableSetOf<String>()
+        collectHandlers(bytes, 0, bytes.size, handlers, depth = 0)
+        if (handlers.isEmpty()) return null
+        return "soun" in handlers && "vide" !in handlers
+    }
+
+    /** Walks boxes collecting `hdlr` handler types, bounded so a crafted file cannot spin. */
+    private fun collectHandlers(
+        bytes: ByteArray,
+        start: Int,
+        end: Int,
+        out: MutableSet<String>,
+        depth: Int,
+    ) {
+        if (depth > 6 || end - start < 8) return
+        var cursor = start
+        var visited = 0
+        while (cursor + 8 <= end && visited++ < 256) {
+            val size = readInt32(bytes, cursor)
+            val type = String(bytes, cursor + 4, 4, Charsets.US_ASCII)
+            val headerSize = if (size == 1) 16 else 8
+            val boxEnd = when {
+                size == 0 -> end                       // "to the end of the file"
+                size == 1 -> {                         // 64-bit size follows the type
+                    if (cursor + 16 > end) return
+                    val large = readInt64(bytes, cursor + 8)
+                    if (large <= 0 || large > Int.MAX_VALUE) return
+                    cursor + large.toInt()
+                }
+                size < 8 -> return                     // impossible for a real box
+                else -> cursor + size
+            }
+            if (boxEnd <= cursor || boxEnd > end) return
+            when (type) {
+                "hdlr" ->
+                    // version and flags, then a predefined field, then the handler type.
+                    if (cursor + headerSize + 12 <= boxEnd) {
+                        out += String(bytes, cursor + headerSize + 8, 4, Charsets.US_ASCII)
+                    }
+                "moov", "trak", "mdia", "minf", "stbl" ->
+                    collectHandlers(bytes, cursor + headerSize, boxEnd, out, depth + 1)
+            }
+            cursor = boxEnd
+        }
+    }
+
+    private fun readInt32(bytes: ByteArray, at: Int): Int =
+        ((bytes[at].toInt() and 0xFF) shl 24) or
+            ((bytes[at + 1].toInt() and 0xFF) shl 16) or
+            ((bytes[at + 2].toInt() and 0xFF) shl 8) or
+            (bytes[at + 3].toInt() and 0xFF)
+
+    private fun readInt64(bytes: ByteArray, at: Int): Long =
+        (readInt32(bytes, at).toLong() shl 32) or (readInt32(bytes, at + 4).toLong() and 0xFFFFFFFFL)
 
     private fun tooLarge(): MediaResult.Failed =
         MediaResult.Failed("attachment too large (over ${MAX_BYTES / (1024 * 1024)} MB)")
@@ -184,6 +295,25 @@ class MediaFetcher(
             matches(0, 0x47, 0x49, 0x46, 0x38) -> MediaType.Gif
             matches(0, 0x52, 0x49, 0x46, 0x46) && matches(8, 0x57, 0x45, 0x42, 0x50) ->
                 MediaType.Webp
+
+            // "#!AMR" starts every AMR file, which is the codec MMS voice notes use.
+            matches(0, 0x23, 0x21, 0x41, 0x4D, 0x52) -> MediaType.Amr
+            // Either an ID3 tag or a bare MPEG frame header.
+            matches(0, 0x49, 0x44, 0x33) -> MediaType.Mp3
+            at(0) == 0xFF && (at(1) and 0xE0) == 0xE0 -> MediaType.Mp3
+            matches(0, 0x4F, 0x67, 0x67, 0x53) -> MediaType.Ogg
+            matches(0, 0x4D, 0x54, 0x68, 0x64) -> MediaType.Midi
+
+            // mp4 and 3gp both put "ftyp" at byte 4. Distinguishing audio-only mp4 from video
+            // would mean parsing the boxes, and the two are treated the same way anyway.
+            matches(4, 0x66, 0x74, 0x79, 0x70) ->
+                if (matches(8, 0x33, 0x67, 0x70) || matches(8, 0x33, 0x67, 0x65)) {
+                    MediaType.ThreeGp
+                } else {
+                    MediaType.Mp4
+                }
+
+            matches(0, 0x25, 0x50, 0x44, 0x46, 0x2D) -> MediaType.Pdf
             else -> null
         }
     }

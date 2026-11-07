@@ -75,7 +75,7 @@ class MediaFetcherTest {
                 .setBody("this is not an image at all")
         )
         val result = fetcher().fetch(url("/media/liar.png"))
-        assertEquals(MediaResult.Failed("not an image"), result)
+        assertEquals(MediaResult.Failed("unrecognized attachment"), result)
         assertFalse("nothing should have been written", File(root, "mms").listFiles().orEmpty().any())
     }
 
@@ -122,6 +122,44 @@ class MediaFetcherTest {
             results.all { it is MediaResult.Loaded },
         )
         assertEquals("only one download should have happened", 1, server.requestCount)
+    }
+
+    /** A minimal ISO-BMFF file: ftyp, then moov containing one track with [handler]. */
+    private fun mp4(handler: String): ByteArray {
+        fun box(type: String, payload: ByteArray): ByteArray {
+            val size = 8 + payload.size
+            return byteArrayOf(
+                (size ushr 24).toByte(), (size ushr 16).toByte(),
+                (size ushr 8).toByte(), size.toByte(),
+            ) + type.toByteArray(Charsets.US_ASCII) + payload
+        }
+        val ftyp = box("ftyp", "isom".toByteArray(Charsets.US_ASCII) + ByteArray(8))
+        // hdlr payload: version and flags, a predefined field, then the handler type.
+        val hdlr = box(
+            "hdlr",
+            ByteArray(8) + handler.toByteArray(Charsets.US_ASCII) + ByteArray(13),
+        )
+        val moov = box("moov", box("trak", box("mdia", hdlr)))
+        val mdat = box("mdat", ByteArray(16))
+        return ftyp + moov + mdat
+    }
+
+    @Test
+    fun `an mp4 with only an audio track becomes a voice note`() = runBlocking {
+        server.enqueue(MockResponse().setBody(Buffer().write(mp4("soun"))))
+        val result = fetcher().fetch(url("/media/voice.m4a"))
+        assertTrue("expected a load, got $result", result is MediaResult.Loaded)
+        assertEquals(MediaType.M4a, (result as MediaResult.Loaded).type)
+        assertEquals(MediaKind.Audio, result.type.kind)
+    }
+
+    @Test
+    fun `an mp4 with a video track stays a video`() = runBlocking {
+        server.enqueue(MockResponse().setBody(Buffer().write(mp4("vide"))))
+        val result = fetcher().fetch(url("/media/clip.mp4"))
+        assertTrue("expected a load, got $result", result is MediaResult.Loaded)
+        assertEquals(MediaType.Mp4, (result as MediaResult.Loaded).type)
+        assertEquals(MediaKind.Video, result.type.kind)
     }
 
     @Test
