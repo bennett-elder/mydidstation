@@ -17,10 +17,17 @@ real thing:
 
     curl -s localhost:8765/control/state
     curl -s "localhost:8765/control/inbound?did=5551234567&contact=5551110001&text=hello"
+    curl -s "localhost:8765/control/mms?count=2&kind=image"
+    curl -s "localhost:8765/control/mms?kind=garbage"     # lies about its content type
+    curl -s "localhost:8765/control/mms?kind=gone"        # the link has expired
+    curl -s "localhost:8765/control/mms?kind=huge"        # 24 MB, to prove the cap
     curl -s "localhost:8765/control/voicemail?mailbox=1001&callerid=5551110009&duration=00:00:04"
     curl -s "localhost:8765/control/fail?code=522&count=2"
     curl -s "localhost:8765/control/delay?ms=1500"
     curl -s localhost:8765/control/reset
+
+Attachments are served from `/media/<name>`, and the links handed out by getMMS are built
+from the request's own host, so the emulator's 10.0.2.2 reaches this process too.
 
 Every API call is logged with a timestamp, so the polling cadence is visible in
 the terminal while you watch the app.
@@ -36,6 +43,7 @@ import struct
 import threading
 import time
 import wave
+import zlib
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -97,7 +105,7 @@ VOICEMAIL_MP3 = Path(__file__).with_name("voicemail_tone.mp3")
 
 STATE = {
     "messages": [],
-    "next_id": 9000,
+    "next_id": 0,
     "voicemails": [],
     "next_vm": 0,
     "fail_code": 0,
@@ -120,7 +128,8 @@ def stamp():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def add_message(did, contact, text, incoming, carrier_status="Information not available"):
+def add_message(did, contact, text, incoming, carrier_status="Information not available",
+                media=()):
     with LOCK:
         STATE["next_id"] += 1
         body = text.replace(" ", "+") if ENCODE_SPACES else text
@@ -132,9 +141,31 @@ def add_message(did, contact, text, incoming, carrier_status="Information not av
             "contact": contact,
             "message": body,
             "carrier_status": carrier_status,
+            # Names, not URLs. The absolute link is built when the row is served, because
+            # only then is the request's own Host known, and 10.0.2.2 from the emulator has
+            # to reach the same mock as localhost from the host.
+            "media": list(media),
         }
         STATE["messages"].append(message)
         return message
+
+
+def tiny_png(width=48, height=48, rgb=(70, 130, 190)):
+    """A solid PNG, built here so the mock needs no image library.
+
+    Real bytes with a real signature, because the point of the fixture is that the app has
+    to identify the type from the content rather than from the URL or a header.
+    """
+    raw = b"".join(b"\x00" + bytes(rgb) * width for _ in range(height))
+
+    def chunk(kind, data):
+        body = kind + data
+        return (struct.pack(">I", len(data)) + body +
+                struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF))
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) +
+            chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
 
 
 def public_vm(entry):
@@ -211,9 +242,20 @@ def audio_b64(entry, fmt="mp3", rate=8000, cap_seconds=4):
     return base64.b64encode(buf.getvalue()).decode()
 
 
+def id_base():
+    """Where the next message id starts.
+
+    Not a small constant, because the app dedupes on (did, remote_id) and a long-lived
+    emulator database would silently ignore a "new" message that reused an id it already
+    held. Seeding from the clock keeps restarts from colliding without anyone having to
+    remember to clear the app's data before an MMS test.
+    """
+    return int(time.time() * 1000)
+
+
 def seed():
     STATE["messages"] = []
-    STATE["next_id"] = 9000
+    STATE["next_id"] = id_base()
     add_message("5551234567", "5551110001", "first of the day", incoming=True)
     add_message("5551234567", "5551110001", "second one", incoming=True)
     add_message("5551234567", "5551110001", "replied earlier", incoming=False,
@@ -257,6 +299,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_bytes(self, code, body, content_type="application/octet-stream"):
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def send_raw(self, code, body, content_type="text/html"):
         raw = body.encode()
         self.send_response(code)
@@ -267,7 +316,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def params(self):
         parsed = urlparse(self.path)
-        fields = parse_qs(parsed.query)
+        # Blank values are kept, so `text=` means an empty body rather than a missing
+        # parameter. A message that arrives with no text is a case worth being able to test.
+        fields = parse_qs(parsed.query, keep_blank_values=True)
         if self.command == "POST":
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b""
@@ -289,7 +340,28 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path.startswith("/control"):
             return self.control(parsed)
+        if parsed.path.startswith("/media/"):
+            return self.media(parsed)
         return self.api()
+
+    def media(self, parsed):
+        """An attachment link, the way `media.php?map=...` behaves.
+
+        Four variants, because each one is a failure the app has to survive: a real image,
+        a file that lies about being one, an expired link, and something too large to hold
+        in memory. The name decides, so a test can ask for the one it wants.
+        """
+        name = parsed.path[len("/media/"):]
+        self.log_api(f"media {name}")
+        if name.startswith("gone"):
+            return self.send_bytes(404, b"expired", "text/plain")
+        if name.startswith("garbage"):
+            # Declared as a JPEG, actually text. The header is the sender's word.
+            return self.send_bytes(200, b"this is not an image at all." * 20, "image/jpeg")
+        if name.startswith("huge"):
+            # Enough to prove the cap stops it, without allocating anything clever.
+            return self.send_bytes(200, b"\x00" * (24 * 1024 * 1024), "image/png")
+        return self.send_bytes(200, tiny_png(), "image/png")
 
     def control(self, parsed):
         fields = self.params()
@@ -319,6 +391,21 @@ class Handler(BaseHTTPRequestHandler):
                 f"control: added voicemail {entry['mailbox']}/{entry['message_num']}"
             )
             return self.send_json({"added": public_vm(entry)})
+        if route == "/control/mms":
+            count = max(1, min(3, int(fields.get("count", 1))))
+            kind = fields.get("kind", "image")
+            message = add_message(
+                fields.get("did", DIDS[0]["did"]),
+                fields.get("contact", "5551110002"),
+                fields.get("text", "picture from the mock"),
+                incoming=True,
+                media=[f"{kind}{index}.png" for index in range(1, count + 1)],
+            )
+            self.log_api(
+                f"control: added mms id={message['id']} media={count} kind={kind}"
+            )
+            return self.send_json({"added": {k: v for k, v in message.items() if k != "media"},
+                                   "media": message["media"]})
         if route == "/control/inbound":
             message = add_message(
                 fields.get("did", DIDS[0]["did"]),
@@ -402,7 +489,16 @@ class Handler(BaseHTTPRequestHandler):
             self.log_api(f"getMMS did={did} {date_from}..{date_to} -> {len(rows)} row(s)")
             if not rows:
                 return self.send_json({"status": "no_sms"})
-            return self.send_json({"status": "success", "sms": rows})
+            # The links are absolute and point back at whichever host asked, which is how
+            # the emulator's 10.0.2.2 resolves to this process rather than to nothing.
+            host = self.headers.get("Host", "localhost")
+            out = []
+            for m in rows:
+                row = {k: v for k, v in m.items() if k != "media"}
+                for index, name in enumerate(m.get("media", [])[:3], start=1):
+                    row[f"col_media{index}"] = f"http://{host}/media/{name}"
+                out.append(row)
+            return self.send_json({"status": "success", "sms": out})
 
         if method == "getSMS":
             wanted = fields.get("sms", "")
