@@ -106,6 +106,7 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
                  unread INTEGER NOT NULL DEFAULT 0,
                  pending INTEGER NOT NULL DEFAULT 0,
                  carrier_status TEXT NOT NULL DEFAULT '',
+                 body_checked INTEGER NOT NULL DEFAULT 0,
                  UNIQUE(did, remote_id)
                )"""
         )
@@ -231,6 +232,14 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
             )
             db.execSQL("DROP TABLE voicemail_v7")
             db.execSQL("CREATE INDEX IF NOT EXISTS voicemail_mailbox ON voicemail(mailbox, folder)")
+        }
+        if (oldVersion < 9) {
+            // v9 records whether an incoming message's body has been confirmed against the
+            // by-id call. The list can return a body with its non-ASCII characters removed,
+            // which is invisible to any check on the text itself: "hello" with an emoji
+            // arrives as "hello ". So each incoming message is confirmed once and the column
+            // remembers that, instead of the app asking again on every poll.
+            db.execSQL("ALTER TABLE message ADD COLUMN body_checked INTEGER NOT NULL DEFAULT 0")
         }
     }
 
@@ -360,8 +369,9 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
     /**
      * Fills in a body the list did not carry.
      *
-     * Only used for a message we already hold, and only when the stored body is empty, so a
-     * repeated poll cannot overwrite text with nothing.
+     * Used once per incoming message, because the list can strip non-ASCII characters from a
+     * body without leaving any trace that it did. Only ever fills a blank column, so a repeat
+     * call cannot replace text with nothing.
      */
     fun updateBody(did: String, remoteId: Long, body: String) = synchronized(lock) {
         if (body.isBlank()) return@synchronized
@@ -372,6 +382,48 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
             "did = ? AND remote_id = ? AND (body IS NULL OR body = '')",
             arrayOf(did, remoteId.toString()),
         )
+    }
+
+    /** Replaces a body outright, for when the by-id call is the better copy. */
+    fun replaceBody(did: String, remoteId: Long, body: String) = synchronized(lock) {
+        if (body.isBlank()) return@synchronized
+        val values = ContentValues().apply { put("body", body) }
+        writableDatabase.update(
+            "message",
+            values,
+            "did = ? AND remote_id = ?",
+            arrayOf(did, remoteId.toString()),
+        )
+    }
+
+    /** Notes that this message's body has been confirmed against the by-id call. */
+    fun markBodyChecked(did: String, remoteId: Long) = synchronized(lock) {
+        val values = ContentValues().apply { put("body_checked", 1) }
+        writableDatabase.update(
+            "message",
+            values,
+            "did = ? AND remote_id = ?",
+            arrayOf(did, remoteId.toString()),
+        )
+    }
+
+    /**
+     * Incoming messages whose body has never been confirmed, newest first.
+     *
+     * The by-id check is worth one request per message and no more, so the sweep works
+     * through these a few at a time and the column stops it coming back to the same row.
+     */
+    fun uncheckedIncoming(did: String, limit: Int): List<Long> = synchronized(lock) {
+        val out = mutableListOf<Long>()
+        readableDatabase.rawQuery(
+            """SELECT remote_id FROM message
+                WHERE did = ? AND incoming = 1 AND body_checked = 0 AND remote_id IS NOT NULL
+                ORDER BY sent_at DESC LIMIT ?""",
+            arrayOf(did, limit.toString()),
+        ).use { c ->
+            while (c.moveToNext()) out.add(c.getLong(0))
+        }
+        out
     }
 
     /** Stores a transcript against the exact recording it belongs to. */
@@ -723,6 +775,6 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
 
     private companion object {
         const val NAME = "mydidstation.db"
-        const val VERSION = 8
+        const val VERSION = 9
     }
 }

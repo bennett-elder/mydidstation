@@ -506,9 +506,14 @@ class Handler(BaseHTTPRequestHandler):
             for m in rows:
                 row = {k: v for k, v in m.items() if k != "media"}
                 if STATE["strip_list_bodies"] and any(ord(ch) > 127 for ch in row.get("message", "")):
-                    # The vendor quirk: the row is listed, its text is not.
-                    self.log_api(f"getMMS id={row['id']} body dropped (non-ASCII)")
-                    row["message"] = ""
+                    # The vendor quirk: the row is listed, its non-ASCII characters are not.
+                    # A body that was one emoji therefore arrives empty, and a body that was
+                    # text plus an emoji arrives as the text alone — two different failures
+                    # from the same cause, which is why the app verifies bodies by id.
+                    self.log_api(f"getMMS id={row['id']} non-ASCII stripped")
+                    row["message"] = "".join(
+                        ch for ch in row["message"] if ord(ch) < 128
+                    )
                 for index, name in enumerate(m.get("media", [])[:3], start=1):
                     row[f"col_media{index}"] = f"http://{host}/media/{name}"
                 out.append(row)

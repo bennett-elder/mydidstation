@@ -94,14 +94,67 @@ class SyncBackfillTest {
         assertTrue("the by-id call was never made: $asked", asked.contains("getSMS"))
     }
 
+    /** The list row for a mixed text and emoji body: the text, without the emoji. */
+    private fun listWithoutEmoji(id: Long): MockResponse = MockResponse().setBody(
+        """{"status":"success","sms":[{"id":$id,"date":"2026-11-07 11:29:09","type":"1",""" +
+            """"did":"5551234567","contact":"5551110002","message":"hello there",""" +
+            """"carrier_status":"Information not available"}]}"""
+    )
+
+    /** The same message by id, emoji included. */
+    private fun byIdMixed(id: Long): MockResponse = MockResponse().setBody(
+        """{"status":"success","sms":[{"id":$id,"date":"2026-11-07 11:29:09","type":"1",""" +
+            """"did":"5551234567","contact":"5551110002","message":"hello there \ud83c\udfc1",""" +
+            """"carrier_status":"Information not available"}]}"""
+    )
+
     @Test
-    fun `a message that already has text costs no extra request`() = runBlocking {
+    fun `a body the list stripped of its emoji is replaced by the by-id copy`() = runBlocking {
+        // The case that is invisible without a check: the list body is not blank, it is just
+        // wrong, so nothing about the row says the emoji is missing.
+        val id = 1_794_070_003_554L
+        server.enqueue(listWithoutEmoji(id))
+        server.enqueue(byIdMixed(id))
+
+        val store = store()
+        store.putDid("5551234567")
+        val api = VoipMs(FakeSettings(server.url("/rest.php").toString()))
+        val sync = Sync(store, api, Notifier { _, _, _, _ -> })
+        sync.refreshDid("5551234567")
+
+        val row = store.messages(store.conversationId("5551234567", "5551110002")).single()
+        assertEquals("hello there \ud83c\udfc1", row.body)
+    }
+
+    @Test
+    fun `a verified body is not asked for again`() = runBlocking {
+        val id = 1_794_070_003_555L
+        server.enqueue(listWithoutEmoji(id))
+        server.enqueue(byIdMixed(id))
+        // The second pass sees the same row again, and must not ask for it again.
+        server.enqueue(listWithoutEmoji(id))
+
+        val store = store()
+        store.putDid("5551234567")
+        val api = VoipMs(FakeSettings(server.url("/rest.php").toString()))
+        val sync = Sync(store, api, Notifier { _, _, _, _ -> })
+        sync.refreshDid("5551234567")
+        sync.refreshDid("5551234567")
+
+        // Two list calls plus exactly one by-id call: the check is remembered per message.
+        assertEquals("verification ran more than once", 3, server.requestCount)
+    }
+
+    @Test
+    fun `an outgoing message costs no verification`() = runBlocking {
+        // Only incoming bodies can have been stripped by the list, and only they are fetched
+        // again. A sent message's text is ours and already correct.
         val id = 1_794_068_759_317L
         server.enqueue(
             MockResponse().setBody(
                 """{"status":"success","sms":[{"id":$id,"date":"2026-11-07 11:29:09",""" +
-                    """"type":"1","did":"5551234567","contact":"5551110002",""" +
-                    """"message":"plain text","carrier_status":"Information not available"}]}"""
+                    """"type":"0","did":"5551234567","contact":"5551110002",""" +
+                    """"message":"plain text","carrier_status":"delivered"}]}"""
             )
         )
 
@@ -111,7 +164,7 @@ class SyncBackfillTest {
         val sync = Sync(store, api, Notifier { _, _, _, _ -> })
         sync.refreshDid("5551234567")
 
-        assertEquals(1, server.requestCount)
+        assertEquals("a sent message should not be fetched by id", 1, server.requestCount)
         val row = store.messages(store.conversationId("5551234567", "5551110002")).single()
         assertEquals("plain text", row.body)
     }

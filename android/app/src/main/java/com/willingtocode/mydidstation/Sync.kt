@@ -297,7 +297,6 @@ class Sync(
         fresh: MutableList<RemoteMsg>? = null,
     ): Int {
         var added = 0
-        var backfilled = 0
         for (message in messages) {
             val isNew = store.upsertRemote(
                 did = did,
@@ -310,25 +309,41 @@ class Sync(
                 unread = unread && message.incoming,
                 carrierStatus = message.carrierStatus,
             )
-            // The list call can omit the text of a message it still reports — a real account
-            // did this for a text that was one emoji — while the same message fetched by id
-            // has it. Only rows with no text and no attachment are worth a second request,
-            // and only a few per pass, so a bad list cannot turn into a request storm.
-            if (message.body.isBlank() && message.media.isEmpty() &&
-                backfilled < MAX_BODY_BACKFILL
-            ) {
-                backfilled++
-                val full = runCatching { api.message(message.remoteId) }.getOrNull()
-                if (full != null && full.body.isNotBlank()) {
-                    store.updateBody(did, message.remoteId, full.body)
-                }
-            }
             if (isNew) {
                 added++
                 if (message.incoming) fresh?.add(message)
             }
         }
+        verifyBodies(did)
         return added
+    }
+
+    /**
+     * Confirms incoming bodies against the by-id call, once each.
+     *
+     * The list can return a body with its non-ASCII characters removed, and leaves no mark:
+     * a message that was one emoji arrives empty and one that was text plus an emoji arrives
+     * as the text alone. Nothing in the stored row says which, so the only reliable check is
+     * to ask for the message by id, and the only affordable rule is to ask once per message.
+     * `body_checked` records that, so the sweep drains rather than running forever.
+     */
+    private suspend fun verifyBodies(did: String) {
+        for (id in store.uncheckedIncoming(did, MAX_BODY_BACKFILL)) {
+            val full = try {
+                api.message(id)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Leave it unchecked: a network failure says nothing about the body.
+                continue
+            }
+            // No answer means the id is not on the server any more, which is still an answer
+            // about this row, so it is not asked again.
+            if (full != null && full.body.isNotBlank()) {
+                store.replaceBody(did, id, full.body)
+            }
+            store.markBodyChecked(did, id)
+        }
     }
 
     /**
