@@ -2,11 +2,23 @@ package com.willingtocode.mydidstation
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
 
 /** What one tap of the load-more control would fetch. */
 data class LookBack(val days: Int, val more: Boolean)
+
+/**
+ * Attempts at one recording's audio, and the wait before each retry.
+ *
+ * Three, because a real account answers `data: "false"` instead of audio for a recording it
+ * cannot serve at that moment and succeeds on the next request. Top level rather than in the
+ * companion so a test can assert the count without the companion becoming public.
+ */
+internal const val VOICEMAIL_AUDIO_ATTEMPTS = 3
+internal const val VOICEMAIL_AUDIO_RETRY_MS = 200L
+
 
 /**
  * Polling engine. One request per DID per window, a fixed overlap to catch late
@@ -111,12 +123,33 @@ class Sync(
         messageNum: Int,
     ): File = withContext(Dispatchers.IO) {
         cache.existing(mailbox, folder, messageNum)
-            ?: cache.write(
-                mailbox,
-                folder,
-                messageNum,
-                api.voicemailAudio(mailbox, folder, messageNum),
-            )
+            ?: cache.write(mailbox, folder, messageNum, downloadAudio(mailbox, folder, messageNum))
+    }
+
+    /**
+     * Downloads the audio, retrying the answer that is worth retrying.
+     *
+     * The API answers `data: "false"` for a recording it cannot serve at that moment, and
+     * the same request a moment later works, which was measured on a real account rather
+     * than assumed. Three attempts with a short wait turns that into an invisible delay.
+     * A wrong identity is not retried: it fails as a plain error and no amount of waiting
+     * changes it.
+     */
+    private suspend fun downloadAudio(mailbox: String, folder: String, messageNum: Int): ByteArray {
+        var last: AudioUnavailable? = null
+        repeat(VOICEMAIL_AUDIO_ATTEMPTS) { attempt ->
+            try {
+                return api.voicemailAudio(mailbox, folder, messageNum)
+            } catch (e: AudioUnavailable) {
+                last = e
+                if (attempt < VOICEMAIL_AUDIO_ATTEMPTS - 1) {
+                    delay(VOICEMAIL_AUDIO_RETRY_MS * (attempt + 1))
+                }
+            }
+        }
+        throw AudioUnavailable(
+            "${last?.message ?: "no audio"} (gave up after $VOICEMAIL_AUDIO_ATTEMPTS attempts)",
+        )
     }
 
     /**

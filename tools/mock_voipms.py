@@ -103,6 +103,10 @@ STATE = {
     "fail_code": 0,
     "fail_remaining": 0,
     "delay_ms": 0,
+    # How many audio requests still answer `data: "false"` instead of bytes. That is what
+    # a real account sends for a recording it cannot serve at that moment, and it succeeds
+    # on the next request, so the app retries. Nothing else in the mock can reproduce it.
+    "audio_false_remaining": 0,
 }
 
 # The vendor doc's own example shows "hello+john", which implies the API urlencodes
@@ -335,11 +339,20 @@ class Handler(BaseHTTPRequestHandler):
                 STATE["delay_ms"] = int(fields.get("ms", 0))
             self.log_api(f"control: delay {STATE['delay_ms']} ms")
             return self.send_json({"delay_ms": STATE["delay_ms"]})
+        if route == "/control/audio-not-ready":
+            with LOCK:
+                STATE["audio_false_remaining"] = int(fields.get("count", 1))
+            self.log_api(
+                "control: next %d audio call(s) answer data=false"
+                % STATE["audio_false_remaining"]
+            )
+            return self.send_json({"count": STATE["audio_false_remaining"]})
         if route == "/control/reset":
             with LOCK:
                 STATE["fail_code"] = 0
                 STATE["fail_remaining"] = 0
                 STATE["delay_ms"] = 0
+                STATE["audio_false_remaining"] = 0
             seed()
             self.log_api("control: reset")
             return self.send_json({"reset": True})
@@ -467,6 +480,22 @@ class Handler(BaseHTTPRequestHandler):
             if not rows:
                 return self.send_json({"status": "message_not_found"})
             requested = fields.get("format", "mp3")
+            with LOCK:
+                not_ready = STATE["audio_false_remaining"] > 0
+                if not_ready:
+                    STATE["audio_false_remaining"] -= 1
+            if not_ready:
+                # What the real account sends instead of audio, so the app's retry has
+                # something to be tested against.
+                self.log_api(
+                    f"getVoicemailMessageFile {mailbox}/{folder}/{number} -> data=false"
+                )
+                return self.send_json({"status": "success", "message": {
+                    "mailbox": mailbox,
+                    "folder": folder,
+                    "message_num": rows[0]["message_num"],
+                    "data": "false",
+                }})
             # An object, not an array of one. That is what the real API answers, and
             # the vendor's documentation shows the array, so a mock that follows the
             # doc hides the mismatch until a phone hits the real server. Both are

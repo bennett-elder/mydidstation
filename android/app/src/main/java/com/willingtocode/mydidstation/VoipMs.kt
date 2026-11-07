@@ -16,6 +16,16 @@ import java.util.concurrent.TimeUnit
 
 class ApiException(val status: String) : Exception("VoIP.ms returned status=$status")
 
+/**
+ * A response that carried a word instead of audio.
+ *
+ * The API answers `data: "false"` for a recording it cannot serve at that moment, and the
+ * same request a second later succeeds. That is worth retrying, unlike a blank payload,
+ * which means the mailbox, folder and number did not name a recording at all.
+ */
+class AudioUnavailable(message: String) : Exception(message)
+
+
 /** One number the account reports, and whether the account can message on it. */
 data class DiscoveredDid(val did: String, val smsEnabled: Boolean, val mailbox: String)
 
@@ -274,12 +284,16 @@ class VoipMs(private val settings: ApiSettings) {
         val bytes = try {
             decodeAudio(data)
         } catch (e: ApiException) {
-            // Payload first, because the five characters are the diagnosis. The echoed
-            // identity only earns its place when it differs from what was asked for.
+            // Payload first, because the characters are the diagnosis. The echoed identity
+            // only earns its place when it differs from what was asked for.
+            //
+            // This is the retryable failure: the API had a record of the message and sent a
+            // word instead of its audio. A blank `data` above is not retryable, because that
+            // means the identity named nothing.
             val echo = echoIdentity(json)
             val expected = "mailbox=$mailbox folder=$folder message_num=$messageNum"
             val differs = echo.isNotEmpty() && echo != expected
-            throw ApiException(
+            throw AudioUnavailable(
                 "no audio for $mailbox/$folder/$messageNum: ${e.message}" +
                     if (differs) " (the API echoed $echo)" else "",
             )
