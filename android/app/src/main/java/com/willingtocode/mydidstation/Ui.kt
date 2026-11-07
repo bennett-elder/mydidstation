@@ -3,6 +3,7 @@ package com.willingtocode.mydidstation
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
+import android.text.format.DateFormat as AndroidDateFormat
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -39,6 +40,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -65,6 +67,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -73,9 +76,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 
 /** A pending row older than this is assumed to have never been sent. */
 private const val STALE_PENDING_SECONDS = 15L * 60
@@ -241,6 +243,8 @@ fun Root(container: Container, open: Target? = null, onConsumed: () -> Unit = {}
 @Composable
 fun DidListScreen(container: Container, onOpen: (String) -> Unit, onSettings: () -> Unit) {
     val scope = rememberCoroutineScope()
+    val time = rememberTimeStyle()
+    val now = System.currentTimeMillis() / 1000
     var rows by remember { mutableStateOf<List<DidRow>>(emptyList()) }
     var refreshing by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
@@ -361,7 +365,11 @@ fun DidListScreen(container: Container, onOpen: (String) -> Unit, onSettings: ()
                             )
                         }
                         Text(
-                            if (row.lastAt > 0) shortDate(row.lastAt) else "",
+                            if (row.lastAt > 0) {
+                                When.row(row.lastAt, now, time.tz, time.locale, time.use24Hour)
+                            } else {
+                                ""
+                            },
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
@@ -375,9 +383,6 @@ fun DidListScreen(container: Container, onOpen: (String) -> Unit, onSettings: ()
 internal fun plural(count: Int, noun: String): String =
     if (count == 1) "1 $noun" else "$count ${noun}s"
 
-internal fun shortDate(epochSeconds: Long): String =
-    SimpleDateFormat("MMM d", Locale.getDefault()).format(Date(epochSeconds * 1000))
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConversationsScreen(
@@ -388,6 +393,8 @@ fun ConversationsScreen(
     onNew: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    val time = rememberTimeStyle()
+    val now = System.currentTimeMillis() / 1000
     var rows by remember { mutableStateOf<List<ConvRow>>(emptyList()) }
     var refreshing by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
@@ -492,14 +499,32 @@ fun ConversationsScreen(
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text(row.contact, style = MaterialTheme.typography.titleMedium)
-                            if (row.unread > 0) {
-                                Text(
-                                    "${row.unread}",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    fontWeight = FontWeight.Bold,
-                                )
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                if (row.lastAt > 0) {
+                                    Text(
+                                        When.row(
+                                            row.lastAt,
+                                            now,
+                                            time.tz,
+                                            time.locale,
+                                            time.use24Hour,
+                                        ),
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                                if (row.unread > 0) {
+                                    Text(
+                                        "${row.unread}",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold,
+                                    )
+                                }
                             }
                         }
                         if (row.preview.isNotBlank()) {
@@ -565,6 +590,8 @@ fun MessagesScreen(
     onBack: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    val time = rememberTimeStyle()
+    val now = System.currentTimeMillis() / 1000
     var to by remember { mutableStateOf(contact) }
     var resolvedContact by remember { mutableStateOf(contact) }
     var resolvedId by remember { mutableStateOf(conversationId) }
@@ -717,7 +744,26 @@ fun MessagesScreen(
                     state = listState,
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    items(messages, key = { it.id }) { message ->
+                    itemsIndexed(messages, key = { _, message -> message.id }) { index, message ->
+                        // The day is stated once, above the first message of that day,
+                        // so each bubble only has to carry a clock.
+                        val day = When.day(message.sentAt, now, time.tz, time.locale)
+                        val newDay = index == 0 ||
+                            day != When.day(
+                                messages[index - 1].sentAt,
+                                now,
+                                time.tz,
+                                time.locale,
+                            )
+                        if (newDay) {
+                            Text(
+                                day,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                            )
+                        }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = if (message.incoming)
@@ -757,7 +803,12 @@ fun MessagesScreen(
                                         buildString {
                                             append(
                                                 if (message.pending) "Sending…"
-                                                else shortDate(message.sentAt)
+                                                else When.clock(
+                                                    message.sentAt,
+                                                    time.tz,
+                                                    time.locale,
+                                                    time.use24Hour,
+                                                )
                                             )
                                             if (status != null) append("  ·  ").append(status)
                                         },
@@ -868,6 +919,21 @@ private fun MessageBody(text: String, linkColor: Color) {
         }
     }
     SelectionContainer { Text(annotated) }
+}
+
+/** Zone, locale and the 24-hour habit, gathered once per screen. */
+private data class TimeStyle(val tz: TimeZone, val locale: Locale, val use24Hour: Boolean)
+
+@Composable
+private fun rememberTimeStyle(): TimeStyle {
+    val context = LocalContext.current
+    return remember(context) {
+        TimeStyle(
+            tz = TimeZone.getDefault(),
+            locale = Locale.getDefault(),
+            use24Hour = AndroidDateFormat.is24HourFormat(context),
+        )
+    }
 }
 
 /** A label and a row of mutually exclusive choices, used for the sync cadence. */
