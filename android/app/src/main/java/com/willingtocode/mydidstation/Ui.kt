@@ -1,9 +1,13 @@
 package com.willingtocode.mydidstation
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.pm.PackageManager
 import android.os.Build
 import android.text.format.DateFormat as AndroidDateFormat
+import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -966,6 +970,18 @@ private fun ChoiceRow(
     }
 }
 
+/** The activity hosting this composition. Null in a preview, where there is none. */
+private fun Context.hostActivity(): Activity? {
+    var context: Context? = this
+    while (context is ContextWrapper) {
+        if (context is Activity) return context
+        val next = context.baseContext
+        if (next === context) return null
+        context = next
+    }
+    return context as? Activity
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(container: Container, onDone: () -> Unit) {
@@ -982,6 +998,14 @@ fun SettingsScreen(container: Container, onDone: () -> Unit) {
     val viewFocus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
     val context = LocalContext.current
+
+    // A screenshot, a screen recording or the recents card of this screen would show
+    // which account is configured. Cleared on the way out, so threads stay shareable.
+    DisposableEffect(context) {
+        val window = context.hostActivity()?.window
+        window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        onDispose { window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
+    }
     var foreground by remember { mutableStateOf(container.settings.foregroundSeconds()) }
     var background by remember { mutableStateOf(container.settings.backgroundMinutes()) }
     var endpoint by remember { mutableStateOf(container.settings.endpoint()) }
