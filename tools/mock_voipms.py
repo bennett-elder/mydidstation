@@ -38,6 +38,7 @@ import time
 import wave
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 LOCK = threading.Lock()
@@ -89,6 +90,10 @@ MAILBOXES = [
 # start depending on something the real API never sends.
 VM_FIELDS = ("mailbox", "folder", "message_num", "date", "callerid", "duration",
              "urgent", "listened")
+
+# The generated tone served for mp3 requests. A file rather than a base64 literal so the
+# source stays readable; see audio_b64 for how it was made.
+VOICEMAIL_MP3 = Path(__file__).with_name("voicemail_tone.mp3")
 
 STATE = {
     "messages": [],
@@ -166,8 +171,21 @@ def add_voicemail(mailbox, callerid, duration="00:00:05", urgent=False, listened
         return entry
 
 
-def audio_b64(entry, rate=8000, cap_seconds=4):
-    """A short WAV tone, so playback has real bytes to hand to a decoder."""
+def audio_b64(entry, fmt="mp3", rate=8000, cap_seconds=4):
+    """The recording bytes, base64 encoded.
+
+    mp3 unless wav is asked for, because that is what the real API does: its `format`
+    parameter defaults to mp3, with wav, wav49 and gsm as the alternatives. The mp3 is a
+    short tone generated once with
+
+        ffmpeg -f lavfi -i 'sine=frequency=440:duration=1.5' -ac 1 -ar 22050 \\
+               -b:a 24k -y tools/voicemail_tone.mp3
+
+    and kept as a file rather than a base64 literal so this source stays readable. The
+    wav branch synthesises its tone, which needs no encoder.
+    """
+    if fmt == "mp3" and VOICEMAIL_MP3.exists():
+        return base64.b64encode(VOICEMAIL_MP3.read_bytes()).decode()
     seconds = 0
     for part in entry["duration"].split(":"):
         seconds = seconds * 60 + int(part)
@@ -443,13 +461,12 @@ class Handler(BaseHTTPRequestHandler):
                          f"format={fields.get('format', 'mp3')} -> {len(rows)} row(s)")
             if not rows:
                 return self.send_json({"status": "message_not_found"})
-            # WAV whatever was asked for: the app asks for wav, and a codec here would
-            # be testing a resampler rather than the app.
+            requested = fields.get("format", "mp3")
             return self.send_json({"status": "success", "message": [{
                 "mailbox": mailbox,
                 "folder": folder,
                 "message_num": rows[0]["message_num"],
-                "data": audio_b64(rows[0]),
+                "data": audio_b64(rows[0], requested),
             }]})
 
         if method == "markListenedVoicemailMessage":
