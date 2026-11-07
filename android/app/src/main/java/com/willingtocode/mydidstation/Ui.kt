@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.ui.text.LinkAnnotation
@@ -63,14 +64,18 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -1009,6 +1014,9 @@ fun SettingsScreen(container: Container, onDone: () -> Unit) {
     var foreground by remember { mutableStateOf(container.settings.foregroundSeconds()) }
     var background by remember { mutableStateOf(container.settings.backgroundMinutes()) }
     var endpoint by remember { mutableStateOf(container.settings.endpoint()) }
+    // What the app is actually pointed at. It only changes when an edit is finished, so
+    // a poll cannot fire at a half-typed URL.
+    var activeEndpoint by remember { mutableStateOf(container.settings.endpoint()) }
     var showEndpoint by remember { mutableStateOf(false) }
     var notifyOn by remember { mutableStateOf(container.settings.notificationsEnabled()) }
     var notifyAllowed by remember {
@@ -1129,22 +1137,58 @@ fun SettingsScreen(container: Container, onDone: () -> Unit) {
                 },
             )
             if (showEndpoint) {
+                val focus = LocalFocusManager.current
+                // The store normalizes what it is given: it trims, and an empty or
+                // default value clears the override. Showing what is in force rather
+                // than what was typed keeps that honest.
+                fun commitEndpoint() {
+                    if (endpoint == activeEndpoint) return
+                    container.settings.setEndpoint(endpoint)
+                    activeEndpoint = container.settings.endpoint()
+                    endpoint = activeEndpoint
+                }
+                // Back or leaving the screen can happen without the field losing focus
+                // first, so the edit is written on the way out too. The state below has
+                // to be the latest value, not the one from the composition that created
+                // this effect.
+                val latest = rememberUpdatedState(endpoint)
+                DisposableEffect(Unit) {
+                    onDispose { container.settings.setEndpoint(latest.value) }
+                }
                 OutlinedTextField(
                     value = endpoint,
-                    onValueChange = {
-                        endpoint = it
-                        container.settings.setEndpoint(it)
-                    },
+                    onValueChange = { endpoint = it },
                     label = { Text("API endpoint") },
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { focus.clearFocus() }),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onFocusChanged { if (!it.isFocused) commitEndpoint() },
                 )
+                Text(
+                    if (activeEndpoint == Settings.DEFAULT_ENDPOINT) "In force: VoIP.ms"
+                    else "In force: $activeEndpoint",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                // Focus loss alone is not enough: tapping plain text does not take focus
+                // away from a text field, so an edit would sit uncommitted while the app
+                // kept using the old endpoint. The button is the deliberate commit.
+                TextButton(
+                    onClick = {
+                        commitEndpoint()
+                        focus.clearFocus()
+                    },
+                    enabled = endpoint != activeEndpoint,
+                ) {
+                    Text("Use this endpoint")
+                }
                 Text(
                     "For a local mock, use http://10.0.2.2:8765/rest.php on an emulator, " +
                         "or http://localhost:8765/rest.php on a phone after " +
-                        "adb reverse tcp:8765 tcp:8765. Clear the field to go back to " +
-                        "VoIP.ms. Credentials are sent to whatever is in here, so treat " +
-                        "it as a development control.",
+                        "adb reverse tcp:8765 tcp:8765. Clearing the field puts it back " +
+                        "to VoIP.ms. Credentials are sent to whatever is in here, so " +
+                        "treat it as a development control.",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
