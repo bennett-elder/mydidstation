@@ -12,6 +12,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.rememberScrollState
@@ -79,6 +80,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -88,6 +90,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
@@ -95,6 +98,9 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import coil3.compose.AsyncImage
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -742,16 +748,61 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
 @Composable
 private fun AttachmentLine(container: Container, url: String) {
     var result by remember(url) { mutableStateOf<MediaResult?>(null) }
+    var expanded by remember(url) { mutableStateOf(false) }
     LaunchedEffect(url) { result = container.media.fetch(url) }
-    val label = when (val state = result) {
-        null -> "attachment…"
-        is MediaResult.Loaded -> {
-            val kilobytes = (state.file.length() + 1023) / 1024
-            "${state.type.name.lowercase()} · $kilobytes KB"
+
+    val loaded = result as? MediaResult.Loaded
+    if (loaded == null) {
+        val label = when (val state = result) {
+            null -> "attachment…"
+            is MediaResult.Failed -> state.reason
+            // Only Loaded reaches the branch above, so this is unreachable but harmless.
+            is MediaResult.Loaded -> "attachment"
         }
-        is MediaResult.Failed -> state.reason
+        Text(label, style = MaterialTheme.typography.labelSmall)
+        return
     }
-    Text(label, style = MaterialTheme.typography.labelSmall)
+
+    // Height-capped so one tall photo cannot fill the screen and hide the conversation, and
+    // fitted rather than cropped: a crop hides part of what someone sent, which is worse than
+    // a smaller picture. A tap opens it whole for detail.
+    AsyncImage(
+        model = loaded.file,
+        contentDescription = "Attachment",
+        contentScale = ContentScale.Fit,
+        modifier = Modifier
+            .heightIn(max = 240.dp)
+            .clip(MaterialTheme.shapes.small)
+            .clickable { expanded = true },
+    )
+    if (expanded) {
+        Dialog(
+            onDismissRequest = { expanded = false },
+            // Without this the dialog is inset from the screen edges, which defeats the point
+            // of opening a picture larger: the margins are pixels the image cannot use.
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            // Three ways out, because each covers a case the others do not: the button is
+            // visible, the background tap is what people try first, and back is what the
+            // system promises. An image that fills the width leaves no background to tap.
+            Box(Modifier.fillMaxSize().background(Color.Black)) {
+                AsyncImage(
+                    model = loaded.file,
+                    contentDescription = "Attachment",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clickable { expanded = false },
+                )
+                TextButton(
+                    onClick = { expanded = false },
+                    modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
+                ) {
+                    Text("Close", color = Color.White)
+                }
+            }
+        }
+    }
 }
 
 @Composable
