@@ -63,7 +63,9 @@ DIDS = [
         "did": "5559876543",
         "description": "Mock side, no SMS on this one",
         "routing": "account:100001_VoIP",
-        "voicemail": "1002",
+        # Points at the same mailbox as the first DID on purpose: mailboxes are not tied
+        # one-to-one to numbers, and pointing several at one box is a normal setup.
+        "voicemail": "1001",
         "pop": "16",
         "billing_type": "2",
         "cnam": "0",
@@ -72,13 +74,14 @@ DIDS = [
     },
 ]
 
-# Voicemail mailboxes. A DID points at one through its `voicemail` field, which
-# getDIDsInfo already returns, and every other voicemail method is keyed by mailbox
-# rather than by DID. `password` is in the real getVoicemails payload; the app must
-# ignore it, so the mock serves it too and the parser has to drop it.
+# Voicemail mailboxes. Two relationships matter and both are modelled here: mailbox 1001
+# is shared by every DID above, and mailbox 1002 has no DID pointing at it at all, which
+# is what an unmapped or freshly created box looks like. `password` is in the real
+# getVoicemails payload; the app must ignore it, so the mock serves it and the parser has
+# to drop it.
 MAILBOXES = [
     {"mailbox": "1001", "name": "Mock main", "transcription": "yes", "password": "1234"},
-    {"mailbox": "1002", "name": "Mock side", "transcription": "no", "password": "4321"},
+    {"mailbox": "1002", "name": "Unrouted box", "transcription": "no", "password": "4321"},
 ]
 
 # Exactly the fields the documented getVoicemailMessages output carries. Anything else
