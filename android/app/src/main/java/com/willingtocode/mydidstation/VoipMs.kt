@@ -271,7 +271,19 @@ class VoipMs(private val settings: ApiSettings) {
         requireSuccess(json)
         val data = firstData(json, mailbox, folder, messageNum)
         if (!audioLengthAllowed(data.length)) throw ApiException("audio_too_large")
-        val bytes = decodeAudio(data)
+        val bytes = try {
+            decodeAudio(data)
+        } catch (e: ApiException) {
+            // Payload first, because the five characters are the diagnosis. The echoed
+            // identity only earns its place when it differs from what was asked for.
+            val echo = echoIdentity(json)
+            val expected = "mailbox=$mailbox folder=$folder message_num=$messageNum"
+            val differs = echo.isNotEmpty() && echo != expected
+            throw ApiException(
+                "no audio for $mailbox/$folder/$messageNum: ${e.message}" +
+                    if (differs) " (the API echoed $echo)" else "",
+            )
+        }
         if (bytes.size > MAX_AUDIO_BYTES) throw ApiException("audio_too_large")
         return bytes
     }
@@ -296,11 +308,35 @@ class VoipMs(private val settings: ApiSettings) {
         return try {
             Base64.decode(padded, Base64.NO_WRAP)
         } catch (e: IllegalArgumentException) {
+            val strayNote = if (stray > 0) ", $stray not in the alphabet" else ""
             throw ApiException(
-                "the audio is not base64 (${usable.length} characters, " +
-                    "$stray outside the alphabet)",
+                "the payload is ${usable.length} characters, starting " +
+                    "\"${preview(raw)}\"$strayNote",
             )
         }
+    }
+
+    /**
+     * The start of a payload, safe to show.
+     *
+     * A five character `data` cannot be audio, and the characters themselves are the whole
+     * diagnosis: `false` is a sentinel, noise is a broken body. Anything unprintable
+     * becomes a question mark so a binary payload cannot garble the screen.
+     */
+    private fun preview(raw: String, limit: Int = 40): String {
+        val head = raw.take(limit).map { if (it.isISOControl() || it.code > 126) '?' else it }
+        return head.joinToString("") + if (raw.length > limit) "…" else ""
+    }
+
+    /** The identity the API recognised, for a failure that has to explain itself. */
+    private fun echoIdentity(json: JSONObject): String {
+        val row = json.optJSONObject("message") ?: json.optJSONArray("message")?.optJSONObject(0)
+            ?: return ""
+        return listOf("mailbox", "folder", "message_num")
+            .mapNotNull { key ->
+                row.optString(key).takeIf { it.isNotEmpty() }?.let { "$key=$it" }
+            }
+            .joinToString(" ")
     }
 
     /**
@@ -327,13 +363,7 @@ class VoipMs(private val settings: ApiSettings) {
             // number do not describe a recording. Echoing back what it recognised is what
             // separates a wrong identity from an empty file, and it is the only thing the
             // phone can tell us when nobody is watching the wire.
-            val echo = (json.optJSONObject("message") ?: json.optJSONArray("message")?.optJSONObject(0))
-                ?.let { row ->
-                    listOf("mailbox", "folder", "message_num")
-                        .mapNotNull { key -> row.optString(key).takeIf { it.isNotEmpty() }?.let { "$key=$it" } }
-                        .joinToString(" ")
-                }
-                .orEmpty()
+            val echo = echoIdentity(json)
             val keys = json.keys().asSequence().joinToString(",")
             throw ApiException(
                 "no audio for $mailbox/$folder/$messageNum (fields: $keys)" +

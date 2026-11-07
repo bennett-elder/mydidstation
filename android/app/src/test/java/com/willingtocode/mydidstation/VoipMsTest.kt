@@ -303,15 +303,50 @@ class VoipMsTest {
     @Test
     fun `base64 that cannot be base64 says how much arrived`() {
         // A length congruent to 1 mod 4 cannot be whole bytes whatever padding is added,
-        // and that is the shape the platform's decoder rejects. The stray-character count
-        // is reported because the decoder otherwise skips them without a word.
+        // and that is the shape the platform's decoder rejects.
         val failure = runCatching { api().decodeAudio("AAAAA") }.exceptionOrNull()
         assertNotNull("an impossible length has to fail", failure)
         val text = failure?.message.orEmpty()
         assertTrue("length missing from '$text'", text.contains("5 characters"))
-        assertTrue("stray count missing from '$text'", text.contains("0 outside the alphabet"))
+        assertTrue("payload missing from '$text'", text.contains("\"AAAAA\""))
+        // Nothing was discarded here, so the noise about stray characters stays out.
+        assertFalse("needless stray note in '$text'", text.contains("not in the alphabet"))
 
         assertNotNull(runCatching { api().decodeAudio("") }.exceptionOrNull())
+    }
+
+    @Test
+    fun `a five character payload shows what it says`() = runBlocking {
+        // The count alone was not enough to tell a sentinel from a broken body: five
+        // characters, none of them outside the alphabet, is what the phones reported for
+        // recordings that would not play. The characters have to be on the screen.
+        reply(
+            """{"status":"success","message":{"mailbox":"1001","folder":"Old",""" +
+                """"message_num":3,"data":"false"}}"""
+        )
+        val failure = runCatching { api().voicemailAudio("1001", "Old", 3) }.exceptionOrNull()
+        assertNotNull("a five character payload has to fail", failure)
+        val text = failure?.message.orEmpty()
+        assertTrue("payload missing from '$text'", text.contains("\"false\""))
+        assertTrue("length missing from '$text'", text.contains("5 characters"))
+        assertFalse(
+            "the echo repeats the request here, so it should be left out: '$text'",
+            text.contains("echoed"),
+        )
+    }
+
+    @Test
+    fun `a payload for the wrong folder names both identities`() = runBlocking {
+        // Asked for INBOX, answered about Old: a move between refreshes, which is the
+        // kind of drift a per-device database can hold.
+        reply(
+            """{"status":"success","message":{"mailbox":"1001","folder":"Old",""" +
+                """"message_num":3,"data":"false"}}"""
+        )
+        val failure = runCatching { api().voicemailAudio("1001", "INBOX", 3) }.exceptionOrNull()
+        val text = failure?.message.orEmpty()
+        assertTrue("echo missing from '$text'", text.contains("the API echoed"))
+        assertTrue("echoed folder missing from '$text'", text.contains("folder=Old"))
     }
 
     @Test
