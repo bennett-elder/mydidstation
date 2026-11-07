@@ -1321,6 +1321,16 @@ fun MessagesScreen(
                                             text = message.body,
                                             linkColor = MaterialTheme.colorScheme.primary,
                                         )
+                                    } else if (message.media.isEmpty()) {
+                                        // A message that arrived with no text and no attachment is
+                                        // still a message, and saying so is itself the test: an
+                                        // empty bubble cannot distinguish "the API sent nothing"
+                                        // from "we failed to draw it".
+                                        Text(
+                                            "(empty message body)",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
                                     }
                                     message.media.forEach { url ->
                                         // MMS rendering comes next; the URL is real and clickable later.
