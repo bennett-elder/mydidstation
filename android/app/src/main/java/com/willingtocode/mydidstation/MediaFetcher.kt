@@ -192,8 +192,17 @@ class MediaFetcher(
         /** How many bytes are needed to identify the four formats: WebP needs twelve. */
         private const val SNIFF_BYTES = 16
 
-        /** One attachment's ceiling. MMS is normally far smaller than this. */
-        const val MAX_BYTES = 8L * 1024 * 1024
+        /**
+         * One attachment's ceiling.
+         *
+         * The vendor's own limit is 1.2 MB per file (`voipms-api.md`, the sendMMS section), so
+         * anything past that is not a real MMS leaving a carrier intact — it is a provider
+         * anomaly or a payload aimed at the phone. 2 MB accepts everything legitimate with
+         * headroom and refuses the rest. Note this caps the *file*, not the decoded bitmap: a
+         * small file can still decode huge, which is why the decoder is given a target size
+         * rather than trusted.
+         */
+        const val MAX_BYTES = 2L * 1024 * 1024
 
         /** What all the cached attachments may occupy together. */
         const val MAX_CACHE_BYTES = 64L * 1024 * 1024
