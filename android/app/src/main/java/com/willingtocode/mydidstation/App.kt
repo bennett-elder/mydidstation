@@ -27,4 +27,7 @@ class Container(private val context: Context) {
     val api by lazy { VoipMs(settings) }
     val notifier by lazy { AndroidNotifier(context) }
     val sync by lazy { Sync(store, api, notifier) }
+
+    /** Downloaded audio, in the cache directory the OS may empty whenever it likes. */
+    val voicemailCache by lazy { VoicemailCache(context.cacheDir) }
 }

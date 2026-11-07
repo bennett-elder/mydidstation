@@ -3,6 +3,7 @@ package com.willingtocode.mydidstation
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /** What one tap of the load-more control would fetch. */
 data class LookBack(val days: Int, val more: Boolean)
@@ -54,6 +55,27 @@ class Sync(
             )
         }
         found.size
+    }
+
+    /**
+     * The file for one recording, downloading only when the cache has lost it.
+     *
+     * A cache miss is not a failure. The OS evicts this directory whenever it wants the
+     * space back, so playback re-fetches rather than telling the user their copy is gone.
+     */
+    suspend fun voicemailAudioFile(
+        cache: VoicemailCache,
+        mailbox: String,
+        folder: String,
+        messageNum: Int,
+    ): File = withContext(Dispatchers.IO) {
+        cache.existing(mailbox, folder, messageNum)
+            ?: cache.write(
+                mailbox,
+                folder,
+                messageNum,
+                api.voicemailAudio(mailbox, folder, messageNum),
+            )
     }
 
     /**

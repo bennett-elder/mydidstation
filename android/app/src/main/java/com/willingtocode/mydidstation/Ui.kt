@@ -427,8 +427,9 @@ private fun MailboxRowItem(row: MailboxRow, onClick: () -> Unit) {
 /**
  * One mailbox's recordings.
  *
- * Playback, export and the mark-listened write come next; this reads them so the mailbox
- * is not a dead end.
+ * Tapping a recording downloads it into the cache and plays it. Export and the
+ * mark-listened write come next; this makes the mailbox audible, which is the whole point
+ * of the screen.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -438,6 +439,16 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
     var status by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var loaded by remember { mutableStateOf(false) }
+
+    // "folder/number" rather than the number alone: the API moves a message between
+    // folders when it is marked listened, so the number is not an identity on its own.
+    var playing by remember { mutableStateOf<String?>(null) }
+    var fetching by remember { mutableStateOf<String?>(null) }
+    val player = remember { VoicemailPlayer() }
+
+    // Leaving the screen has to stop the audio. Nothing else owns the player, so without
+    // this a recording keeps playing over the mailbox list.
+    DisposableEffect(Unit) { onDispose { player.stop() } }
 
     suspend fun refresh() {
         busy = true
@@ -450,6 +461,34 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
         rows = container.store.voicemails(mailbox)
         loaded = true
         busy = false
+    }
+
+    fun toggle(row: VoiceMailRow) {
+        val key = "${row.folder}/${row.messageNum}"
+        if (playing == key) {
+            player.stop()
+            playing = null
+            return
+        }
+        player.stop()
+        playing = null
+        fetching = key
+        scope.launch {
+            try {
+                val file = container.sync.voicemailAudioFile(
+                    container.voicemailCache,
+                    row.mailbox,
+                    row.folder,
+                    row.messageNum,
+                )
+                player.play(file) { if (playing == key) playing = null }
+                playing = key
+                status = null
+            } catch (e: Exception) {
+                status = e.message ?: "could not fetch that recording"
+            }
+            fetching = null
+        }
     }
 
     LaunchedEffect(mailbox) { refresh() }
@@ -485,8 +524,16 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
                 Text("No recordings in this mailbox.", modifier = Modifier.padding(16.dp))
             }
             LazyColumn(Modifier.fillMaxSize()) {
-                items(rows, key = { it.messageNum }) { row ->
-                    VoiceMailItem(row)
+                // The key cannot be the message number alone. Marking a message listened
+                // moves it from INBOX to Old, so (INBOX, 1) and (Old, 1) can both exist
+                // and a bare number would give the list two identical keys.
+                items(rows, key = { "${it.folder}/${it.messageNum}" }) { row ->
+                    VoiceMailItem(
+                        row = row,
+                        playing = playing == "${row.folder}/${row.messageNum}",
+                        fetching = fetching == "${row.folder}/${row.messageNum}",
+                        onClick = { toggle(row) },
+                    )
                     HorizontalDivider()
                 }
             }
@@ -495,15 +542,32 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
 }
 
 @Composable
-private fun VoiceMailItem(row: VoiceMailRow) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+private fun VoiceMailItem(
+    row: VoiceMailRow,
+    playing: Boolean,
+    fetching: Boolean,
+    onClick: () -> Unit,
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 row.callerId.ifBlank { "Unknown caller" },
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.weight(1f),
             )
-            Text(row.duration, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                when {
+                    fetching -> "Loading…"
+                    playing -> "Playing…"
+                    else -> row.duration
+                },
+                style = MaterialTheme.typography.bodyMedium,
+            )
         }
         Text(
             buildString {
