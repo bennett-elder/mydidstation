@@ -124,8 +124,8 @@ class MediaFetcherTest {
         assertEquals("only one download should have happened", 1, server.requestCount)
     }
 
-    /** A minimal ISO-BMFF file: ftyp, then moov containing one track with [handler]. */
-    private fun mp4(handler: String): ByteArray {
+    /** A minimal ISO-BMFF file: ftyp with [brand], then moov with one track of [handler]. */
+    private fun container(brand: String, handler: String): ByteArray {
         fun box(type: String, payload: ByteArray): ByteArray {
             val size = 8 + payload.size
             return byteArrayOf(
@@ -133,7 +133,7 @@ class MediaFetcherTest {
                 (size ushr 8).toByte(), size.toByte(),
             ) + type.toByteArray(Charsets.US_ASCII) + payload
         }
-        val ftyp = box("ftyp", "isom".toByteArray(Charsets.US_ASCII) + ByteArray(8))
+        val ftyp = box("ftyp", brand.toByteArray(Charsets.US_ASCII) + ByteArray(8))
         // hdlr payload: version and flags, a predefined field, then the handler type.
         val hdlr = box(
             "hdlr",
@@ -143,6 +143,10 @@ class MediaFetcherTest {
         val mdat = box("mdat", ByteArray(16))
         return ftyp + moov + mdat
     }
+
+    private fun mp4(handler: String) = container("isom", handler)
+
+    private fun threegp(handler: String) = container("3gp4", handler)
 
     @Test
     fun `an mp4 with only an audio track becomes a voice note`() = runBlocking {
@@ -160,6 +164,52 @@ class MediaFetcherTest {
         assertTrue("expected a load, got $result", result is MediaResult.Loaded)
         assertEquals(MediaType.Mp4, (result as MediaResult.Loaded).type)
         assertEquals(MediaKind.Video, result.type.kind)
+    }
+
+    @Test
+    fun `a plus in the token is escaped before the request goes out`() = runBlocking {
+        // These tokens are base64, so a '+' is data. Sent raw it arrives as a space, and the
+        // server answers 200 with an empty body — the failure that reads as "empty
+        // attachment" rather than as a bad token.
+        server.enqueue(MockResponse().setBody(Buffer().write(pngBytes)))
+        val result = fetcher().fetch(url("/media.php?map=ab+cd/ef=="))
+        assertTrue("expected a load, got $result", result is MediaResult.Loaded)
+        val path = server.takeRequest().path.orEmpty()
+        assertTrue("the '+' should have been escaped, got $path", path.contains("%2B"))
+        assertFalse("no bare '+' should be on the wire, got $path", path.contains("+"))
+    }
+
+    @Test
+    fun `an audio-only 3gp becomes inline audio`() = runBlocking {
+        // The container a real MMS voice note arrives in, from a carrier rather than a chat
+        // app. Its extension is shared with 3gp video, so only the tracks can say which.
+        server.enqueue(MockResponse().setBody(Buffer().write(threegp("soun"))))
+        val result = fetcher().fetch(url("/media/voice.3gp"))
+        assertTrue("expected a load, got $result", result is MediaResult.Loaded)
+        assertEquals(MediaType.ThreeGpAudio, (result as MediaResult.Loaded).type)
+        assertEquals(MediaKind.Audio, result.type.kind)
+        assertTrue("the name should still be 3gp", result.file.name.endsWith(".3gp"))
+    }
+
+    @Test
+    fun `a 3gp with a video track stays a video`() = runBlocking {
+        server.enqueue(MockResponse().setBody(Buffer().write(threegp("vide"))))
+        val result = fetcher().fetch(url("/media/clip.3gp"))
+        assertEquals(MediaType.ThreeGp, (result as MediaResult.Loaded).type)
+        assertEquals(MediaKind.Video, result.type.kind)
+    }
+
+    @Test
+    fun `a cached 3gp is resolved from its tracks, not its extension`() = runBlocking {
+        // .3gp is used by audio and video alike, so a cache hit that trusted the name would
+        // turn a voice note into a video the second time it was opened.
+        server.enqueue(MockResponse().setBody(Buffer().write(threegp("soun"))))
+        val fetcher = fetcher()
+        val first = fetcher.fetch(url("/media/voice.3gp"))
+        val second = fetcher.fetch(url("/media/voice.3gp"))
+        assertEquals(MediaType.ThreeGpAudio, (second as MediaResult.Loaded).type)
+        assertEquals(first, second)
+        assertEquals(1, server.requestCount)
     }
 
     @Test

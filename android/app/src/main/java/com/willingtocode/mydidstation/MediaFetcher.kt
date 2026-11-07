@@ -44,6 +44,12 @@ enum class MediaType(val extension: String, val kind: MediaKind) {
     ThreeGp("3gp", MediaKind.Video),
     Mp4("mp4", MediaKind.Video),
     /**
+     * A 3GPP container with no video track: what a GrapheneOS voice note turns out to be.
+     * Same container as [ThreeGp], so the two are told apart by their tracks, exactly as
+     * [M4a] is told apart from [Mp4]. The extension stays `3gp`, because that is what it is.
+     */
+    ThreeGpAudio("3gp", MediaKind.Audio),
+    /**
      * An MP4 container with no video track: what Google Messages records a voice note as.
      * The bytes are identical to [Mp4] until the tracks are inspected, so the two are told
      * apart after the file is written rather than from its header.
@@ -97,7 +103,19 @@ class MediaFetcher(
         val key = key(url)
         for (type in MediaType.entries) {
             val file = File(dir(), "$key.${type.extension}")
-            if (file.isFile && file.length() > 0) return MediaResult.Loaded(file, type)
+            if (file.isFile && file.length() > 0) {
+                // A container extension does not say whether it holds a voice note or a
+                // video, and .3gp is used by both, so decide from the tracks again rather
+                // than from the name the file happens to carry.
+                val resolved = when (type) {
+                    MediaType.ThreeGp, MediaType.ThreeGpAudio ->
+                        if (audioOnlyMp4(file) == true) MediaType.ThreeGpAudio else MediaType.ThreeGp
+                    MediaType.Mp4, MediaType.M4a ->
+                        if (audioOnlyMp4(file) == true) MediaType.M4a else MediaType.Mp4
+                    else -> type
+                }
+                return MediaResult.Loaded(file, resolved)
+            }
         }
         return null
     }
@@ -113,7 +131,13 @@ class MediaFetcher(
     }
 
     private fun download(url: String): MediaResult {
-        val request = Request.Builder().url(url).build()
+        // A '+' in a query string means a space unless it is escaped, and these tokens are
+        // base64, so a '+' is data. OkHttp preserves a literal '+' on the wire rather than
+        // escaping it, which reaches the server as a space and comes back as an empty
+        // text/html response with status 200 — the "empty attachment" that looked like the
+        // vendor refusing to serve the file.
+        val safeUrl = url.replace("+", "%2B")
+        val request = Request.Builder().url(safeUrl).build()
         return try {
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
@@ -125,6 +149,16 @@ class MediaFetcher(
                     return MediaResult.Failed(reason)
                 }
                 if (response.body.contentLength() > MAX_BYTES) return tooLarge()
+                // An empty body with a 200 is the shape an endpoint returns when it wants a
+                // session, a referer or a credential it did not get, and the status alone does
+                // not say so. Naming the status, the type and the length is what turns this
+                // from "empty" into something diagnosable from the phone.
+                if (response.body.contentLength() == 0L) {
+                    val kind = response.header("Content-Type") ?: "no type"
+                    return MediaResult.Failed(
+                        "empty attachment (HTTP ${response.code}, $kind, 0 bytes)",
+                    )
+                }
                 response.body.byteStream().use { stream -> store(url, stream) }
             }
         } catch (e: IOException) {
@@ -135,7 +169,7 @@ class MediaFetcher(
     private fun store(url: String, stream: InputStream): MediaResult {
         val head = ByteArray(SNIFF_BYTES)
         val headLength = readUpTo(stream, head)
-        if (headLength <= 0) return MediaResult.Failed("attachment was empty")
+        if (headLength <= 0) return MediaResult.Failed("empty attachment (no bytes arrived)")
         val type = sniff(head, headLength) ?: return MediaResult.Failed("unrecognized attachment")
 
         val target = File(dir(), "${key(url)}.${type.extension}")
@@ -179,8 +213,13 @@ class MediaFetcher(
         // asking a media parser, so nothing executes on these bytes before the user taps play.
         if (type == MediaType.Mp4 || type == MediaType.ThreeGp) {
             if (audioOnlyMp4(target) == true) {
-                val voice = File(target.parentFile, "${key(url)}.${MediaType.M4a.extension}")
-                if (target.renameTo(voice)) return MediaResult.Loaded(voice, MediaType.M4a)
+                val spoken = if (type == MediaType.ThreeGp) {
+                    MediaType.ThreeGpAudio
+                } else {
+                    MediaType.M4a
+                }
+                val voice = File(target.parentFile, "${key(url)}.${spoken.extension}")
+                if (target.renameTo(voice)) return MediaResult.Loaded(voice, spoken)
             }
         }
         return MediaResult.Loaded(target, type)
