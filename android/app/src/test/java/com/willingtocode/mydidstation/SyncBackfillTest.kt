@@ -1,0 +1,118 @@
+package com.willingtocode.mydidstation
+
+import android.app.Application
+import kotlinx.coroutines.runBlocking
+import okhttp3.mockwebserver.Dispatcher
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.annotation.Config
+
+/**
+ * The by-id backfill for a list that withholds a message's text.
+ *
+ * A real account listed a message whose body was a single emoji with no `message` field at
+ * all, while the same message fetched by id had it. The list is what refresh uses, so
+ * without this the text never arrives.
+ */
+@RunWith(RobolectricTestRunner::class)
+@Config(application = Application::class)
+class SyncBackfillTest {
+
+    private lateinit var server: MockWebServer
+
+    private class FakeSettings(private val url: String) : ApiSettings {
+        override fun credentials() = "user@example.com" to "secret"
+        override fun endpoint() = url
+    }
+
+    /** The list row: present, with no text. */
+    private fun listWithoutBody(id: Long): MockResponse = MockResponse().setBody(
+        """{"status":"success","sms":[{"id":$id,"date":"2026-11-07 11:29:09","type":"1",""" +
+            """"did":"5551234567","contact":"5551110002","message":"",""" +
+            """"carrier_status":"Information not available"}]}"""
+    )
+
+    /** The same message, fetched by id, with the emoji intact. */
+    private fun byId(id: Long): MockResponse = MockResponse().setBody(
+        """{"status":"success","sms":[{"id":$id,"date":"2026-11-07 11:29:09","type":"1",""" +
+            """"did":"5551234567","contact":"5551110002","message":"\ud83c\udf89",""" +
+            """"carrier_status":"Information not available"}]}"""
+    )
+
+    @Before
+    fun start() {
+        server = MockWebServer()
+        server.start()
+    }
+
+    @After
+    fun stop() {
+        server.shutdown()
+    }
+
+    private fun store(): Store {
+        val context = RuntimeEnvironment.getApplication()
+        context.deleteDatabase("mydidstation.db")
+        return Store(context)
+    }
+
+    @Test
+    fun `a message whose text the list withheld is fetched by id`() = runBlocking {
+        val id = 1_794_068_759_316L
+        val asked = mutableListOf<String>()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val body = request.body.readUtf8()
+                asked += if (body.contains("method=getSMS") || body.contains("name=\"method\"") &&
+                    body.contains("getSMS")
+                ) {
+                    "getSMS"
+                } else {
+                    "getMMS"
+                }
+                return if (asked.last() == "getSMS") byId(id) else listWithoutBody(id)
+            }
+        }
+
+        val store = store()
+        store.putDid("5551234567")
+        val api = VoipMs(FakeSettings(server.url("/rest.php").toString()))
+        val sync = Sync(store, api, Notifier { _, _, _, _ -> })
+        sync.refreshDid("5551234567")
+
+        val row = store.messages(store.conversationId("5551234567", "5551110002")).single()
+        assertEquals("the emoji should have been filled in", "\ud83c\udf89", row.body)
+        assertTrue("the by-id call was never made: $asked", asked.contains("getSMS"))
+    }
+
+    @Test
+    fun `a message that already has text costs no extra request`() = runBlocking {
+        val id = 1_794_068_759_317L
+        server.enqueue(
+            MockResponse().setBody(
+                """{"status":"success","sms":[{"id":$id,"date":"2026-11-07 11:29:09",""" +
+                    """"type":"1","did":"5551234567","contact":"5551110002",""" +
+                    """"message":"plain text","carrier_status":"Information not available"}]}"""
+            )
+        )
+
+        val store = store()
+        store.putDid("5551234567")
+        val api = VoipMs(FakeSettings(server.url("/rest.php").toString()))
+        val sync = Sync(store, api, Notifier { _, _, _, _ -> })
+        sync.refreshDid("5551234567")
+
+        assertEquals(1, server.requestCount)
+        val row = store.messages(store.conversationId("5551234567", "5551110002")).single()
+        assertEquals("plain text", row.body)
+    }
+}

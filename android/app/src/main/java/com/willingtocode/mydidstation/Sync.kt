@@ -19,6 +19,15 @@ data class LookBack(val days: Int, val more: Boolean)
 internal const val VOICEMAIL_AUDIO_ATTEMPTS = 3
 internal const val VOICEMAIL_AUDIO_RETRY_MS = 200L
 
+/**
+ * How many by-id fetches one ingest pass may make to fill in missing text.
+ *
+ * A list that reports rows with no body must not turn into a request per row on every
+ * poll, so a handful per pass is the ceiling; the next pass picks up where this one
+ * stopped.
+ */
+internal const val MAX_BODY_BACKFILL = 8
+
 
 /**
  * Polling engine. One request per DID per window, a fixed overlap to catch late
@@ -281,13 +290,14 @@ class Sync(
      * incoming, which is what a notification is for; older history and the first
      * look at a number pass null because they must not buzz.
      */
-    private fun ingest(
+    private suspend fun ingest(
         did: String,
         messages: List<RemoteMsg>,
         unread: Boolean,
         fresh: MutableList<RemoteMsg>? = null,
     ): Int {
         var added = 0
+        var backfilled = 0
         for (message in messages) {
             val isNew = store.upsertRemote(
                 did = did,
@@ -300,6 +310,19 @@ class Sync(
                 unread = unread && message.incoming,
                 carrierStatus = message.carrierStatus,
             )
+            // The list call can omit the text of a message it still reports — a real account
+            // did this for a text that was one emoji — while the same message fetched by id
+            // has it. Only rows with no text and no attachment are worth a second request,
+            // and only a few per pass, so a bad list cannot turn into a request storm.
+            if (message.body.isBlank() && message.media.isEmpty() &&
+                backfilled < MAX_BODY_BACKFILL
+            ) {
+                backfilled++
+                val full = runCatching { api.message(message.remoteId) }.getOrNull()
+                if (full != null && full.body.isNotBlank()) {
+                    store.updateBody(did, message.remoteId, full.body)
+                }
+            }
             if (isNew) {
                 added++
                 if (message.incoming) fresh?.add(message)

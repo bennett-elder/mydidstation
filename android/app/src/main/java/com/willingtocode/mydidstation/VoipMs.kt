@@ -1,5 +1,6 @@
 package com.willingtocode.mydidstation
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MultipartBody
@@ -143,28 +144,56 @@ class VoipMs(private val settings: ApiSettings) {
         val out = mutableListOf<RemoteMsg>()
         for (i in 0 until array.length()) {
             val row = array.optJSONObject(i) ?: continue
-            val remoteId = row.optString("id").toLongOrNull() ?: continue
-            val sentAt = runCatching {
-                stampFormat.parse(row.optString("date"))!!.time / 1000
-            }.getOrNull() ?: continue
-            val media = listOf(
-                row.optString("col_media1"),
-                row.optString("col_media2"),
-                row.optString("col_media3"),
-            ).filter { it.isNotEmpty() }
-            out.add(
-                RemoteMsg(
-                    remoteId = remoteId,
-                    contact = normalizePhone(row.optString("contact")),
-                    incoming = row.optString("type") == "1",
-                    body = row.optString("message"),
-                    media = media,
-                    sentAt = sentAt,
-                    carrierStatus = row.optString("carrier_status"),
-                )
-            )
+            parseRow(row)?.let { out.add(it) }
         }
         return out
+    }
+
+    /**
+     * One message by id, for the text the list did not carry.
+     *
+     * A real account returned a row from the list with no `message` at all for a text that
+     * was a single emoji, while the same message fetched by id had it. getSMS is asked
+     * first and getMMS by id second, which is the order `notes/message.sh` has used to
+     * diagnose this, and the noise of a failure is not worth reporting here: a caller that
+     * gets null has lost nothing it already had.
+     */
+    suspend fun message(id: Long): RemoteMsg? {
+        for (method in listOf("getSMS", "getMMS")) {
+            val json = try {
+                call("method" to method, "sms" to id.toString())
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                continue
+            }
+            if (json.optString("status") != "success") continue
+            val row = json.optJSONArray("sms")?.optJSONObject(0) ?: continue
+            parseRow(row)?.let { return it }
+        }
+        return null
+    }
+
+    /** One row of a `sms` array, or null when it lacks what a message needs. */
+    private fun parseRow(row: JSONObject): RemoteMsg? {
+        val remoteId = row.optString("id").toLongOrNull() ?: return null
+        val sentAt = runCatching {
+            stampFormat.parse(row.optString("date"))!!.time / 1000
+        }.getOrNull() ?: return null
+        val media = listOf(
+            row.optString("col_media1"),
+            row.optString("col_media2"),
+            row.optString("col_media3"),
+        ).filter { it.isNotEmpty() }
+        return RemoteMsg(
+            remoteId = remoteId,
+            contact = normalizePhone(row.optString("contact")),
+            incoming = row.optString("type") == "1",
+            body = row.optString("message"),
+            media = media,
+            sentAt = sentAt,
+            carrierStatus = row.optString("carrier_status"),
+        )
     }
 
     /**

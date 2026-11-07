@@ -357,6 +357,23 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
         stale.size
     }
 
+    /**
+     * Fills in a body the list did not carry.
+     *
+     * Only used for a message we already hold, and only when the stored body is empty, so a
+     * repeated poll cannot overwrite text with nothing.
+     */
+    fun updateBody(did: String, remoteId: Long, body: String) = synchronized(lock) {
+        if (body.isBlank()) return@synchronized
+        val values = ContentValues().apply { put("body", body) }
+        writableDatabase.update(
+            "message",
+            values,
+            "did = ? AND remote_id = ? AND (body IS NULL OR body = '')",
+            arrayOf(did, remoteId.toString()),
+        )
+    }
+
     /** Stores a transcript against the exact recording it belongs to. */
     fun setVoicemailTranscript(
         mailbox: String,
