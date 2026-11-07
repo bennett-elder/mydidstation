@@ -26,6 +26,38 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Full history, so the step below can diff this push against the commit before it.
+          # The repository is small and the alternative is a release for a version that
+          # already exists.
+          fetch-depth: 0
+
+      # A release belongs to a version bump and nothing else. Publishing on every push is
+      # what produced the "tag already exists" failure when a fix went out without one, so
+      # the publish step is gated on the version actually changing in this push.
+      - name: Did the version change?
+        id: version_changed
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "tag push: always publishing"
+            exit 0
+          fi
+          before="${{ github.event.before }}"
+          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "no previous commit to compare: treating the version as changed"
+            exit 0
+          fi
+          # This push may carry several commits, and the bump is usually the last of them.
+          if git diff --name-only "$before" "$GITHUB_SHA" | grep -qx 'android/version.properties'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "android/version.properties changed: publishing"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "android/version.properties unchanged: building only"
+          fi
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -151,7 +183,7 @@ jobs:
           retention-days: 90
 
       - name: Publish release
-        if: ${{ github.event_name == 'push' || inputs.create_release }}
+        if: ${{ (github.event_name == 'push' && steps.version_changed.outputs.changed == 'true') || inputs.create_release }}
         # gh is preinstalled on GitHub-hosted runners, so publishing needs no third-party
         # action and nothing to pin. This replaces softprops/action-gh-release, which was
         # the only unowned code in this file.
