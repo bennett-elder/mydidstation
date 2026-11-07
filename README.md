@@ -75,14 +75,15 @@ implementation notes for each.
 ```bash
 cd android
 ./gradlew :app:assembleDebug        # android/app/build/outputs/apk/debug/app-debug.apk
-./gradlew :app:testDebugUnitTest    # SMS segmentation tests
+./gradlew :app:testDebugUnitTest    # unit tests, Robolectric included
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 Requires JDK 17. Compose BOM 2026.09.00 forces `compileSdk 37`. AGP 9 carries
 Kotlin, so `org.jetbrains.kotlin.android` must not be applied.
 
-Only the SMS segmentation is tested. `notes/STATUS.md` ranks the rest.
+The tests cover SMS segmentation, link matching, time formatting, the VoIP.ms
+request and response shapes, and the store. `notes/STATUS.md` lists the gaps.
 
 ### Testing without the real API
 
@@ -103,7 +104,7 @@ Every push builds a signed APK and publishes it as a prerelease.
 
 The version lives in `android/version.properties`, which is committed. Nothing
 computes a version during a build, so a commit always produces the same numbers:
-`0.11.62246` / `11062246` at the time of writing, meaning months since December
+`0.11.70128` / `11070128` at the time of writing, meaning months since December
 2025, then day and time. `scripts/version.sh write` rewrites that file from the
 clock and refuses to run under CI, so the file only ever changes when a person
 commits it.

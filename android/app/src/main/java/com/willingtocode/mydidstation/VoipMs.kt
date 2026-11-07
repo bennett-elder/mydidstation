@@ -32,7 +32,7 @@ data class RemoteMsg(
  * The one REST endpoint we talk to. Per-DID calls only: the API has no batch
  * method and no cursor, so the sync layer owns the windowing (D8).
  */
-class VoipMs(private val settings: Settings) {
+class VoipMs(private val settings: ApiSettings) {
 
     private val http = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)

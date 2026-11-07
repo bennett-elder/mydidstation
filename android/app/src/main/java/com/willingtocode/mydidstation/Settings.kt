@@ -4,8 +4,20 @@ import android.content.Context
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
+/**
+ * The two answers the API layer needs, and nothing else.
+ *
+ * An interface because constructing the real [Settings] needs a Keystore-backed
+ * preference store, and that is the only thing between [VoipMs] and a unit test.
+ */
+interface ApiSettings {
+    fun credentials(): Pair<String, String>?
+
+    fun endpoint(): String
+}
+
 /** API credentials, encrypted at rest with a Keystore-backed key. */
-class Settings(context: Context) {
+class Settings(context: Context) : ApiSettings {
 
     private val prefs = EncryptedSharedPreferences.create(
         context,
@@ -19,7 +31,7 @@ class Settings(context: Context) {
         prefs.edit().putString(KEY_EMAIL, email.trim()).putString(KEY_PASSWORD, password).apply()
     }
 
-    fun credentials(): Pair<String, String>? {
+    override fun credentials(): Pair<String, String>? {
         val email = prefs.getString(KEY_EMAIL, null)?.takeIf { it.isNotBlank() } ?: return null
         val password = prefs.getString(KEY_PASSWORD, null)?.takeIf { it.isNotEmpty() } ?: return null
         return email to password
@@ -35,7 +47,7 @@ class Settings(context: Context) {
     }
 
     /** API base URL. Overridable so the app can be pointed at a local mock. */
-    fun endpoint(): String =
+    override fun endpoint(): String =
         prefs.getString(KEY_ENDPOINT, null)?.takeIf { it.isNotBlank() } ?: DEFAULT_ENDPOINT
 
     fun setEndpoint(url: String) {

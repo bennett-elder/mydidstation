@@ -36,6 +36,17 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # Robolectric fetches its Android image into ~/.m2 at test time, which the
+      # Gradle cache above does not cover. One image, pinned in
+      # app/src/test/resources/robolectric.properties, so one entry is enough.
+      - name: Cache Robolectric's Android image
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: robolectric-${{ runner.os }}-${{ hashFiles('android/app/src/test/resources/robolectric.properties') }}
+          restore-keys: |
+            robolectric-${{ runner.os }}-
+
       # No version is computed here. The build reads android/version.properties,
       # so a commit always produces the same numbers, which is what F-Droid
       # requires. Bump it locally with scripts/version.sh write and commit it.

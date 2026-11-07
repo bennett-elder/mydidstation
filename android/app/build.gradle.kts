@@ -28,6 +28,12 @@ android {
 
     buildFeatures { compose = true }
 
+    testOptions {
+        // Robolectric builds a working Context from this module's manifest and
+        // resources, and fails with a missing-manifest error without this.
+        unitTests.isIncludeAndroidResources = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -82,4 +88,11 @@ dependencies {
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    // Real SQLite and real ContentValues on the JVM, so Store can be tested
+    // without a device and without changing how it is written.
+    testImplementation("org.robolectric:robolectric:4.17")
+    // Serves recorded API responses to VoipMs, so parsing is tested against the
+    // shapes the vendor documents rather than against a stub written to agree
+    // with the code.
+    testImplementation("com.squareup.okhttp3:mockwebserver:5.5.0")
 }
