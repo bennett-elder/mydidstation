@@ -31,6 +31,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -971,6 +972,10 @@ fun SettingsScreen(container: Container, onDone: () -> Unit) {
     val scope = rememberCoroutineScope()
     var email by remember { mutableStateOf(container.settings.email()) }
     var password by remember { mutableStateOf("") }
+    // Both fields hold something worth keeping off a shoulder or a screenshot, so
+    // they start hidden and each has its own reveal.
+    var revealEmail by remember { mutableStateOf(false) }
+    var revealPassword by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var found by remember { mutableStateOf<Int?>(null) }
@@ -1029,7 +1034,14 @@ fun SettingsScreen(container: Container, onDone: () -> Unit) {
                 onValueChange = { email = it },
                 label = { Text("API username (email)") },
                 singleLine = true,
+                visualTransformation = if (revealEmail) VisualTransformation.None
+                else PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                trailingIcon = {
+                    TextButton(onClick = { revealEmail = !revealEmail }) {
+                        Text(if (revealEmail) "Hide" else "Show")
+                    }
+                },
                 modifier = Modifier.fillMaxWidth(),
             )
             OutlinedTextField(
@@ -1037,8 +1049,14 @@ fun SettingsScreen(container: Container, onDone: () -> Unit) {
                 onValueChange = { password = it },
                 label = { Text("API password") },
                 singleLine = true,
-                visualTransformation = PasswordVisualTransformation(),
+                visualTransformation = if (revealPassword) VisualTransformation.None
+                else PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                trailingIcon = {
+                    TextButton(onClick = { revealPassword = !revealPassword }) {
+                        Text(if (revealPassword) "Hide" else "Show")
+                    }
+                },
                 modifier = Modifier.fillMaxWidth(),
             )
             Button(
