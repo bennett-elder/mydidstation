@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds only, and one host only: the mock server on the machine hosting the
+     emulator. `localhost` and `127.0.0.1` are deliberately absent. On a phone they are
+     the phone, so any app there could answer on the port and be handed the credentials,
+     and the `adb reverse` route that would make them useful was never wired up. A phone
+     that needs the mock must have its host's address added here by hand.
+
+     This file overrides the main one, so a release APK carries no cleartext exception. -->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">10.0.2.2</domain>
+    </domain-config>
+</network-security-config>

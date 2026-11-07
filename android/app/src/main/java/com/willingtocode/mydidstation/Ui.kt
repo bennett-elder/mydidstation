@@ -1187,11 +1187,11 @@ fun SettingsScreen(container: Container, onDone: () -> Unit) {
                     Text("Use this endpoint")
                 }
                 Text(
-                    "For a local mock, use http://10.0.2.2:8765/rest.php on an emulator, " +
-                        "or http://localhost:8765/rest.php on a phone after " +
-                        "adb reverse tcp:8765 tcp:8765. Clearing the field puts it back " +
-                        "to VoIP.ms. Credentials are sent to whatever is in here, so " +
-                        "treat it as a development control.",
+                    "For the mock server, use http://10.0.2.2:8765/rest.php on an " +
+                        "emulator. Only a debug build talks cleartext, and only to that " +
+                        "host. Clearing the field puts it back to VoIP.ms. Credentials " +
+                        "are sent to whatever is in here, so treat it as a development " +
+                        "control.",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
