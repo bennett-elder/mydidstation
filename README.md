@@ -1,12 +1,12 @@
 # My DID Station
 
-SMS and MMS for [VoIP.ms](https://voip.ms), built for people who run more than
-one number.
+SMS and picture MMS for [VoIP.ms](https://voip.ms), built for people who run more
+than one number.
 
 > Working, and used daily on a real phone. Sending, threaded history, delivery
-> status, notifications and configurable polling all work. MMS is stored and
-> linked but not yet rendered. No F-Droid listing yet; every push publishes a
-> signed APK as a prerelease.
+> status, notifications, configurable polling and MMS photos all work. Photos are
+> fetched with a size cap, identified from their bytes, cached, and shown whole
+> with a tap to open them larger. Sending media is not built.
 
 Not affiliated with or endorsed by VoIP.ms. This is a third-party client that
 talks to their public API using credentials you supply.
@@ -40,6 +40,12 @@ days per tap down to a two-year floor.
   long until the next background run.
 - **Cadence you choose.** 30 s, 60 s, 2 minutes or off while a number is open, and
   15, 30 or 60 minutes in the background.
+- **MMS photos.** A picture arrives, is downloaded over a capped stream, identified
+  from its first bytes rather than its URL, cached under a hash of the link, and
+  drawn at its own aspect ratio so nothing is cropped. Tap it to open it larger,
+  with a Close button and the back gesture both working. Attachments that are not
+  pictures are handed to another app instead: audio plays inline when the server
+  has the bytes, and video, OGG, MIDI and PDF open externally.
 - **Credentials** in Keystore-backed encrypted preferences. The database is local
   SQLite and is never synced anywhere.
 
@@ -47,12 +53,11 @@ days per tap down to a two-year floor.
 
 Said plainly, because you will hit these:
 
-- **MMS is not rendered.** A photo arrives as `[attachment] https://voip.ms/media.php?map=…`.
-  The link is real and the file is on VoIP.ms, but the app never fetches it.
-  Sending media is not built either.
-- **Nothing inside a message reacts to touch.** Links do not open, a message
-  cannot be copied, and part of one cannot be selected. This is the most obvious
-  gap in daily use.
+- **Attachments other than pictures are unreliable.** A photo renders. Audio plays
+  inline, and video, OGG, MIDI and PDF open in another app, but only when the media
+  link actually returns bytes. One real voice note arrived with an empty body behind
+  its link, which shows as an empty attachment rather than playing; that is the
+  server having nothing to serve, not a rendering fault. Sending media is not built.
 - **Numbers, not names.** There is no contact lookup or avatar.
 - **No push.** Latency is bounded by the poll interval, which is between 15 and 60
   minutes in the background.
