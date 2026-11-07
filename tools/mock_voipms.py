@@ -103,6 +103,21 @@ VM_FIELDS = ("mailbox", "folder", "message_num", "date", "callerid", "duration",
 # source stays readable; see audio_b64 for how it was made.
 VOICEMAIL_MP3 = Path(__file__).with_name("voicemail_tone.mp3")
 
+# Real media for the attachment tests, generated once with ffmpeg:
+#   ffmpeg -f lavfi -i 'sine=frequency=660:duration=3' -ac 1 -ar 16000 -b:a 32k \
+#          -y tools/mms_tone.mp3
+#   ffmpeg -f lavfi -i 'testsrc=size=320x240:rate=15:duration=2' -c:v mpeg4 \
+#          -b:v 200k -an -y tools/mms_clip.mp4
+# Kept as files rather than encoded literals so this source stays readable, and because the
+# point of each is that it is a real file the phone's own player will accept.
+AUDIO_CLIP = Path(__file__).with_name("mms_tone.mp3")
+VIDEO_CLIP = Path(__file__).with_name("mms_clip.mp4")
+# Audio-only MP4, which is what Google Messages records a voice note as:
+#   ffmpeg -f lavfi -i 'sine=frequency=520:duration=3' -c:a aac -b:a 48k -vn \
+#          -y tools/mms_voice.m4a
+# The -vn is the point: no video track, so the app has to read the box structure to know.
+VOICE_CLIP = Path(__file__).with_name("mms_voice.m4a")
+
 STATE = {
     "messages": [],
     "next_id": 0,
@@ -355,9 +370,9 @@ class Handler(BaseHTTPRequestHandler):
     def media(self, parsed):
         """An attachment link, the way `media.php?map=...` behaves.
 
-        Four variants, because each one is a failure the app has to survive: a real image,
-        a file that lies about being one, an expired link, and something too large to hold
-        in memory. The name decides, so a test can ask for the one it wants.
+        The name decides what is served, so a test asks for the case it wants: a real image, a
+        real audio clip, a real video clip, a file that lies about being one, an expired link,
+        and something too large to hold in memory.
         """
         name = parsed.path[len("/media/"):]
         self.log_api(f"media {name}")
@@ -369,6 +384,18 @@ class Handler(BaseHTTPRequestHandler):
         if name.startswith("huge"):
             # Enough to prove the cap stops it, without allocating anything clever.
             return self.send_bytes(200, b"\x00" * (24 * 1024 * 1024), "image/png")
+        if name.startswith("voice"):
+            if VOICE_CLIP.exists():
+                return self.send_bytes(200, VOICE_CLIP.read_bytes(), "audio/mp4")
+            return self.send_bytes(404, b"missing fixture", "text/plain")
+        if name.startswith("audio"):
+            if AUDIO_CLIP.exists():
+                return self.send_bytes(200, AUDIO_CLIP.read_bytes(), "audio/mpeg")
+            return self.send_bytes(404, b"missing fixture", "text/plain")
+        if name.startswith("video"):
+            if VIDEO_CLIP.exists():
+                return self.send_bytes(200, VIDEO_CLIP.read_bytes(), "video/mp4")
+            return self.send_bytes(404, b"missing fixture", "text/plain")
         return self.send_bytes(200, tiny_png(), "image/png")
 
     def control(self, parsed):
