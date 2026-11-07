@@ -416,9 +416,10 @@ class VoipMs(private val settings: ApiSettings) {
 
     /**
      * The voicemail date parameters are dates, not timestamps, and they are read in the
-     * same fixed offset everything else is (D-API timezone).
+     * same fixed offset everything else is (D-API timezone). Internal because the store
+     * reconciles a window by the same day boundaries it was asked for.
      */
-    private fun apiDate(epochSeconds: Long): String =
+    internal fun apiDate(epochSeconds: Long): String =
         dateFormat.format(Date(epochSeconds * 1000))
 
     /** Whether a base64 payload is small enough to decode at all. */

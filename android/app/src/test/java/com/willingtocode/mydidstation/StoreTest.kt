@@ -127,6 +127,51 @@ class StoreTest {
     }
 
     @Test
+    fun `the same number in two folders is two recordings`() {
+        // The API numbers messages per folder, so INBOX 1 and Old 1 can both exist. The old
+        // key was (mailbox, message_num) and one of these silently replaced the other.
+        val store = store()
+        store.putVoicemail("1001", 1, "INBOX", "2026-11-07", "5551110002", "00:00:06", false, false)
+        store.putVoicemail("1001", 1, "Old", "2026-11-07", "5551110009", "00:00:12", false, true)
+        val rows = store.voicemails("1001")
+        assertEquals(2, rows.size)
+        assertEquals(setOf("INBOX", "Old"), rows.map { it.folder }.toSet())
+    }
+
+    @Test
+    fun `a refresh keeps a stored transcript`() {
+        val store = store()
+        store.putVoicemail("1001", 1, "INBOX", "2026-11-07", "5551110002", "00:00:06", false, false)
+        store.setVoicemailTranscript("1001", "INBOX", 1, "call me back about the invoice")
+        // The same recording arriving again, as a refresh would deliver it. REPLACE used to
+        // delete and reinsert the row, taking the transcript with it.
+        store.putVoicemail("1001", 1, "INBOX", "2026-11-07", "5551110002", "00:00:07", false, true)
+        val row = store.voicemails("1001").single()
+        assertEquals("call me back about the invoice", row.transcript)
+    }
+
+    @Test
+    fun `reconciling drops a recording that moved and one that went`() {
+        val store = store()
+        store.putVoicemail("1001", 1, "INBOX", "2026-11-07", "5551110002", "00:00:06", false, false)
+        store.putVoicemail("1001", 2, "INBOX", "2026-11-06", "5551110003", "00:00:03", false, false)
+        // 3 describes a message outside the window, so no reconciliation may touch it.
+        store.putVoicemail("1001", 3, "Old", "2026-01-02", "5551110004", "00:00:12", false, true)
+
+        // Number 1 moved to Old, number 2 was deleted on the server.
+        val removed = store.reconcileVoicemails(
+            mailbox = "1001",
+            fromDate = "2026-11-01",
+            toDate = "2026-11-30",
+            seen = setOf("Old" to 1),
+        )
+        assertEquals(2, removed)
+        val rows = store.voicemails("1001")
+        assertEquals(1, rows.size)
+        assertEquals("2026-01-02", rows.single().date)
+    }
+
+    @Test
     fun `a mailbox coverage marker survives a rewrite`() {
         val store = store()
         // Never filled and empty are different answers, and zero is the first.

@@ -70,7 +70,24 @@ class Sync(
         // is covered further back than it is, and it must not move the floor forward
         // either, or a load-more would be undone by an ordinary refresh.
         if (store.voicemailWindowStart(mailbox) == 0L) store.setVoicemailWindowStart(mailbox, from)
+        reconcile(mailbox, from, to, found)
         found.size
+    }
+
+    /**
+     * Removes rows inside the window the server no longer reports.
+     *
+     * A recording that moved folder, or was deleted, leaves a row behind otherwise. The
+     * window is what makes this safe: anything older than what was just fetched is never a
+     * candidate, so a reconciled refresh cannot erase history it did not ask about.
+     */
+    private fun reconcile(mailbox: String, from: Long, to: Long, found: List<VoiceMailInfo>) {
+        store.reconcileVoicemails(
+            mailbox = mailbox,
+            fromDate = api.apiDate(from),
+            toDate = api.apiDate(to),
+            seen = found.map { it.folder to it.messageNum }.toSet(),
+        )
     }
 
     /** What the next tap of load-more would pull for this mailbox, so the label is honest. */
@@ -107,6 +124,7 @@ class Sync(
             )
         }
         store.setVoicemailWindowStart(mailbox, from)
+        reconcile(mailbox, from, covered - 1, found)
         found.size
     }
 

@@ -146,6 +146,18 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
                  urgent_count INTEGER NOT NULL DEFAULT 0
                )"""
         )
+        createVoicemailTable(db)
+        db.execSQL("CREATE INDEX voicemail_mailbox ON voicemail(mailbox, folder)")
+    }
+
+    /**
+     * One recording per mailbox, folder and number.
+     *
+     * The API numbers messages per folder, so (mailbox, message_num) was the wrong key: two
+     * folders holding the same number are two different recordings and one silently replaced
+     * the other. The folder belongs in the key because the audio call is addressed by it.
+     */
+    private fun createVoicemailTable(db: SQLiteDatabase) {
         db.execSQL(
             """CREATE TABLE voicemail (
                  mailbox TEXT NOT NULL,
@@ -157,10 +169,9 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
                  urgent INTEGER NOT NULL DEFAULT 0,
                  listened INTEGER NOT NULL DEFAULT 0,
                  transcript TEXT NOT NULL DEFAULT '',
-                 PRIMARY KEY (mailbox, message_num)
+                 PRIMARY KEY (mailbox, folder, message_num)
                )"""
         )
-        db.execSQL("CREATE INDEX voicemail_mailbox ON voicemail(mailbox, folder)")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -202,6 +213,24 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
             // v7 remembers how far back each mailbox has been filled, so load-more can
             // step past the window even when the box returned nothing inside it.
             createVoicemailWindowTable(db)
+        }
+        if (oldVersion < 8) {
+            // v8 puts the folder in the key. SQLite cannot alter a primary key, so the table
+            // is rebuilt: rename, create the new shape, copy, drop, and recreate the index
+            // under its old name once the renamed table has taken its own away. Every row
+            // survives, and the copy cannot break the stricter new key because the old one
+            // allowed fewer duplicates, not more.
+            db.execSQL("ALTER TABLE voicemail RENAME TO voicemail_v7")
+            createVoicemailTable(db)
+            db.execSQL(
+                """INSERT INTO voicemail (mailbox, folder, message_num, date, callerid,
+                                         duration, urgent, listened, transcript)
+                   SELECT mailbox, folder, message_num, date, callerid, duration, urgent,
+                          listened, transcript
+                     FROM voicemail_v7"""
+            )
+            db.execSQL("DROP TABLE voicemail_v7")
+            db.execSQL("CREATE INDEX IF NOT EXISTS voicemail_mailbox ON voicemail(mailbox, folder)")
         }
     }
 
@@ -276,8 +305,71 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
             put("urgent", if (urgent) 1 else 0)
             put("listened", if (listened) 1 else 0)
         }
-        writableDatabase.insertWithOnConflict(
-            "voicemail", null, values, SQLiteDatabase.CONFLICT_REPLACE,
+        // Insert, and on a known recording update only the columns the server owns. REPLACE
+        // would delete the row and reinsert it, which silently emptied `transcript` on every
+        // refresh, and it is not what a refresh means.
+        val db = writableDatabase
+        val inserted = db.insertWithOnConflict(
+            "voicemail", null, values, SQLiteDatabase.CONFLICT_IGNORE,
+        )
+        if (inserted == -1L) {
+            db.update(
+                "voicemail",
+                values,
+                "mailbox = ? AND folder = ? AND message_num = ?",
+                arrayOf(mailbox, folder, messageNum.toString()),
+            )
+        }
+    }
+
+    /**
+     * Drops rows inside a fetched window that the server no longer reports.
+     *
+     * A recording that moves between folders is a different key now, and one deleted on the
+     * server simply stops appearing; both leave a stale row behind unless the window is
+     * reconciled. Only rows dated inside the window are candidates, so history outside the
+     * fetched range is never touched. Returns how many went.
+     */
+    fun reconcileVoicemails(
+        mailbox: String,
+        fromDate: String,
+        toDate: String,
+        seen: Set<Pair<String, Int>>,
+    ): Int = synchronized(lock) {
+        val stale = mutableListOf<Pair<String, Int>>()
+        readableDatabase.rawQuery(
+            """SELECT folder, message_num FROM voicemail
+                WHERE mailbox = ? AND date BETWEEN ? AND ?""",
+            arrayOf(mailbox, fromDate, toDate),
+        ).use { c ->
+            while (c.moveToNext()) {
+                val key = c.getString(0) to c.getInt(1)
+                if (key !in seen) stale += key
+            }
+        }
+        stale.forEach {
+            writableDatabase.delete(
+                "voicemail",
+                "mailbox = ? AND folder = ? AND message_num = ?",
+                arrayOf(mailbox, it.first, it.second.toString()),
+            )
+        }
+        stale.size
+    }
+
+    /** Stores a transcript against the exact recording it belongs to. */
+    fun setVoicemailTranscript(
+        mailbox: String,
+        folder: String,
+        messageNum: Int,
+        text: String,
+    ) = synchronized(lock) {
+        val values = ContentValues().apply { put("transcript", text) }
+        writableDatabase.update(
+            "voicemail",
+            values,
+            "mailbox = ? AND folder = ? AND message_num = ?",
+            arrayOf(mailbox, folder, messageNum.toString()),
         )
     }
 
@@ -614,6 +706,6 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
 
     private companion object {
         const val NAME = "mydidstation.db"
-        const val VERSION = 7
+        const val VERSION = 8
     }
 }
