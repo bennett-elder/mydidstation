@@ -146,6 +146,55 @@ class SyncBackfillTest {
     }
 
     @Test
+    fun `an answer about a different message is never used`() = runBlocking {
+        // The shape that put one message's text into another: the by-id call misses, the
+        // fallback ignores its filter and returns the whole list, and the first row of that
+        // list is a different message. Nothing may be taken from it.
+        val wanted = 1_794_070_003_556L
+        val other = 1_794_070_003_557L
+        server.enqueue(
+            MockResponse().setBody("""{"status":"no_sms"}""")
+        )
+        server.enqueue(
+            MockResponse().setBody(
+                """{"status":"success","sms":[
+                     {"id":$other,"date":"2026-11-07 12:02:00","type":"1","did":"5551234567",
+                      "contact":"5551110002","message":"Another album cover",
+                      "carrier_status":"Information not available"}]}"""
+            )
+        )
+
+        val store = store()
+        store.putDid("5551234567")
+        val api = VoipMs(FakeSettings(server.url("/rest.php").toString()))
+        val answer = api.message(wanted)
+
+        assertEquals("nothing should come back for a different id", null, answer)
+        assertEquals("both lookups should have been tried", 2, server.requestCount)
+    }
+
+    @Test
+    fun `the matching row is chosen out of a list`() = runBlocking {
+        val wanted = 1_794_070_003_558L
+        val other = 1_794_070_003_559L
+        server.enqueue(
+            MockResponse().setBody(
+                """{"status":"success","sms":[
+                     {"id":$other,"date":"2026-11-07 12:02:00","type":"1","did":"5551234567",
+                      "contact":"5551110002","message":"Another album cover",
+                      "carrier_status":"Information not available"},
+                     {"id":$wanted,"date":"2026-11-07 12:03:00","type":"1","did":"5551234567",
+                      "contact":"5551110002","message":"just the picture",
+                      "carrier_status":"Information not available"}]}"""
+            )
+        )
+
+        val api = VoipMs(FakeSettings(server.url("/rest.php").toString()))
+        val answer = api.message(wanted)
+        assertEquals("just the picture", answer?.body)
+    }
+
+    @Test
     fun `an outgoing message costs no verification`() = runBlocking {
         // Only incoming bodies can have been stripped by the list, and only they are fetched
         // again. A sent message's text is ours and already correct.

@@ -155,8 +155,12 @@ class VoipMs(private val settings: ApiSettings) {
      * A real account returned a row from the list with no `message` at all for a text that
      * was a single emoji, while the same message fetched by id had it. getSMS is asked
      * first and getMMS by id second, which is the order `notes/message.sh` has used to
-     * diagnose this, and the noise of a failure is not worth reporting here: a caller that
-     * gets null has lost nothing it already had.
+     * diagnose this.
+     *
+     * The answer is only used when it is about the id that was asked for. Taking the first
+     * row instead is what let one message's text overwrite another's: a fallback call that
+     * ignores its `sms` filter returns the whole list, and the first row of that list is
+     * usually a different message.
      */
     suspend fun message(id: Long): RemoteMsg? {
         for (method in listOf("getSMS", "getMMS")) {
@@ -168,8 +172,12 @@ class VoipMs(private val settings: ApiSettings) {
                 continue
             }
             if (json.optString("status") != "success") continue
-            val row = json.optJSONArray("sms")?.optJSONObject(0) ?: continue
-            parseRow(row)?.let { return it }
+            val rows = json.optJSONArray("sms") ?: continue
+            for (i in 0 until rows.length()) {
+                val row = rows.optJSONObject(i) ?: continue
+                val parsed = parseRow(row) ?: continue
+                if (parsed.remoteId == id) return parsed
+            }
         }
         return null
     }
