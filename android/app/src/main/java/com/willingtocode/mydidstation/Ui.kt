@@ -199,12 +199,21 @@ enum class Tab(val label: String) {
     Settings("Settings"),
 }
 
+/** Where the Voicemail tab is. Mailboxes first, then one mailbox's recordings. */
+sealed interface VmScreen {
+    data object Mailboxes : VmScreen
+    data class Messages(val mailbox: String, val name: String) : VmScreen
+}
+
 /** A conversation a notification wants opened, as read from the intent. */
 data class Target(val did: String, val contact: String)
 
 @Composable
 fun Root(container: Container, open: Target? = null, onConsumed: () -> Unit = {}) {
     var tab by remember { mutableStateOf(Tab.Texts) }
+    // The Voicemail tab's own stack, so Back inside it returns to the mailbox list
+    // instead of leaving the tab.
+    var vm by remember { mutableStateOf<VmScreen>(VmScreen.Mailboxes) }
     // A notification tap starts at the thread it is about, rather than flashing the
     // numbers list on the way.
     var screen by remember {
@@ -288,7 +297,22 @@ fun Root(container: Container, open: Target? = null, onConsumed: () -> Unit = {}
                     }
                 }
 
-                Tab.Voicemail -> VoicemailScreen(container)
+                Tab.Voicemail -> when (val current = vm) {
+                    VmScreen.Mailboxes -> VoicemailScreen(
+                        container = container,
+                        onOpen = { mailbox, name -> vm = VmScreen.Messages(mailbox, name) },
+                    )
+
+                    is VmScreen.Messages -> {
+                        BackHandler { vm = VmScreen.Mailboxes }
+                        MailboxScreen(
+                            container = container,
+                            mailbox = current.mailbox,
+                            name = current.name,
+                            onBack = { vm = VmScreen.Mailboxes },
+                        )
+                    }
+                }
 
                 Tab.Settings -> SettingsScreen(container, onDone = { tab = Tab.Texts })
             }
@@ -302,7 +326,7 @@ fun Root(container: Container, open: Target? = null, onConsumed: () -> Unit = {}
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun VoicemailScreen(container: Container) {
+fun VoicemailScreen(container: Container, onOpen: (String, String) -> Unit) {
     val scope = rememberCoroutineScope()
     var rows by remember { mutableStateOf<List<MailboxRow>>(emptyList()) }
     var status by remember { mutableStateOf<String?>(null) }
@@ -353,7 +377,7 @@ fun VoicemailScreen(container: Container) {
             }
             LazyColumn(Modifier.fillMaxSize()) {
                 items(rows, key = { it.mailbox }) { row ->
-                    MailboxRowItem(row)
+                    MailboxRowItem(row, onClick = { onOpen(row.mailbox, row.name) })
                     HorizontalDivider()
                 }
             }
@@ -362,8 +386,13 @@ fun VoicemailScreen(container: Container) {
 }
 
 @Composable
-private fun MailboxRowItem(row: MailboxRow) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+private fun MailboxRowItem(row: MailboxRow, onClick: () -> Unit) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 row.name.ifBlank { "Mailbox ${row.mailbox}" },
@@ -392,6 +421,102 @@ private fun MailboxRowItem(row: MailboxRow) {
             },
             style = MaterialTheme.typography.bodySmall,
         )
+    }
+}
+
+/**
+ * One mailbox's recordings.
+ *
+ * Playback, export and the mark-listened write come next; this reads them so the mailbox
+ * is not a dead end.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var rows by remember { mutableStateOf<List<VoiceMailRow>>(emptyList()) }
+    var status by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var loaded by remember { mutableStateOf(false) }
+
+    suspend fun refresh() {
+        busy = true
+        status = null
+        try {
+            container.sync.refreshVoicemails(mailbox)
+        } catch (e: Exception) {
+            status = e.message ?: "could not reach VoIP.ms"
+        }
+        rows = container.store.voicemails(mailbox)
+        loaded = true
+        busy = false
+    }
+
+    LaunchedEffect(mailbox) { refresh() }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text(name.ifBlank { "Mailbox $mailbox" })
+                        Text("Mailbox $mailbox", style = MaterialTheme.typography.bodySmall)
+                    }
+                },
+                navigationIcon = { TextButton(onClick = onBack) { Text("Back") } },
+                actions = {
+                    TextButton(onClick = { scope.launch { refresh() } }, enabled = !busy) {
+                        Text(if (busy) "Checking…" else "Refresh")
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        Column(Modifier.padding(padding).fillMaxSize()) {
+            status?.let {
+                Text(
+                    it,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            if (loaded && rows.isEmpty()) {
+                Text("No recordings in this mailbox.", modifier = Modifier.padding(16.dp))
+            }
+            LazyColumn(Modifier.fillMaxSize()) {
+                items(rows, key = { it.messageNum }) { row ->
+                    VoiceMailItem(row)
+                    HorizontalDivider()
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun VoiceMailItem(row: VoiceMailRow) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                row.callerId.ifBlank { "Unknown caller" },
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.weight(1f),
+            )
+            Text(row.duration, style = MaterialTheme.typography.bodyMedium)
+        }
+        Text(
+            buildString {
+                append(row.date)
+                if (row.urgent) append(" · urgent")
+                if (!row.listened) append(" · new")
+                if (row.folder.isNotBlank() && row.folder != "INBOX") append(" · ${row.folder}")
+            },
+            style = MaterialTheme.typography.bodySmall,
+        )
+        if (row.transcript.isNotBlank()) {
+            Text(row.transcript, style = MaterialTheme.typography.bodyMedium)
+        }
     }
 }
 

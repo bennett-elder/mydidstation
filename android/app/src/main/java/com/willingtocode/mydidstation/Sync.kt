@@ -30,6 +30,30 @@ class Sync(
     }
 
     /**
+     * Refreshes one mailbox's recordings.
+     *
+     * No folder is named, so the API returns everything it holds for the mailbox, which is
+     * what lets one screen show INBOX, Urgent and Old together. Opening a mailbox is what
+     * fetches them, the same way opening a number is what fetches its texts (D8).
+     */
+    suspend fun refreshVoicemails(mailbox: String): Int = withContext(Dispatchers.IO) {
+        val found = api.voicemails(mailbox)
+        found.forEach {
+            store.putVoicemail(
+                mailbox = it.mailbox.ifBlank { mailbox },
+                messageNum = it.messageNum,
+                folder = it.folder,
+                date = it.date,
+                callerId = it.callerId,
+                duration = it.duration,
+                urgent = it.urgent,
+                listened = it.listened,
+            )
+        }
+        found.size
+    }
+
+    /**
      * Refreshes the mailbox list. One call: getVoicemails is the only method that
      * enumerates mailboxes, and a mailbox exists independently of any number.
      *

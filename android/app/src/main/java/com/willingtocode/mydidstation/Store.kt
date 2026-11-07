@@ -44,6 +44,19 @@ data class MailboxRow(
     val dids: Int,
 )
 
+/** One recording. `date` is a date only, because that is all the API sends. */
+data class VoiceMailRow(
+    val mailbox: String,
+    val messageNum: Int,
+    val folder: String,
+    val date: String,
+    val callerId: String,
+    val duration: String,
+    val urgent: Boolean,
+    val listened: Boolean,
+    val transcript: String,
+)
+
 /**
  * Raw SQLite, explicit schema, forward-only migrations, no destructive fallback
  * (DECISIONS.md D3, ARCHITECTURE-LESSONS.md 1.7). Dedupe lives in the schema via
@@ -217,6 +230,62 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
     fun setDidMailbox(did: String, mailbox: String) = synchronized(lock) {
         val values = ContentValues().apply { put("mailbox", mailbox) }
         writableDatabase.update("did", values, "did = ?", arrayOf(did))
+    }
+
+    /** Records one recording, keyed by mailbox and message number. */
+    fun putVoicemail(
+        mailbox: String,
+        messageNum: Int,
+        folder: String,
+        date: String,
+        callerId: String,
+        duration: String,
+        urgent: Boolean,
+        listened: Boolean,
+    ) = synchronized(lock) {
+        val values = ContentValues().apply {
+            put("mailbox", mailbox)
+            put("message_num", messageNum)
+            put("folder", folder)
+            put("date", date)
+            put("callerid", callerId)
+            put("duration", duration)
+            put("urgent", if (urgent) 1 else 0)
+            put("listened", if (listened) 1 else 0)
+        }
+        writableDatabase.insertWithOnConflict(
+            "voicemail", null, values, SQLiteDatabase.CONFLICT_REPLACE,
+        )
+    }
+
+    /** One mailbox's recordings, newest first. The API gives a date and no time. */
+    fun voicemails(mailbox: String): List<VoiceMailRow> = synchronized(lock) {
+        val sql = """
+            SELECT mailbox, message_num, folder, date, callerid, duration, urgent,
+                   listened, transcript
+              FROM voicemail
+             WHERE mailbox = ?
+             ORDER BY date DESC, message_num DESC
+        """
+        val out = mutableListOf<VoiceMailRow>()
+        readableDatabase.rawQuery(sql, arrayOf(mailbox)).use { c ->
+            while (c.moveToNext()) {
+                out.add(
+                    VoiceMailRow(
+                        mailbox = c.getString(0),
+                        messageNum = c.getInt(1),
+                        folder = c.getString(2),
+                        date = c.getString(3),
+                        callerId = c.getString(4),
+                        duration = c.getString(5),
+                        urgent = c.getInt(6) == 1,
+                        listened = c.getInt(7) == 1,
+                        transcript = c.getString(8),
+                    )
+                )
+            }
+        }
+        out
     }
 
     /** Mailboxes for the voicemail tab, busiest first, with how many numbers feed each. */
