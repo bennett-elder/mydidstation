@@ -85,6 +85,9 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -436,6 +439,43 @@ private fun MailboxRowItem(row: MailboxRow, onClick: () -> Unit) {
 }
 
 /**
+ * A download arrow: shaft, head and a floor line.
+ *
+ * Drawn here rather than pulled from `material-icons-extended`, which is a large dependency
+ * for one glyph, and rather than copying Material's path data into an MIT repository. The
+ * fill is black and the tint comes from [Icon], which is how the theme decides its color.
+ */
+private val DownloadGlyph: ImageVector by lazy {
+    ImageVector.Builder(
+        name = "Download",
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f,
+    ).apply {
+        path(fill = SolidColor(Color.Black)) {
+            // The shaft.
+            moveTo(10.6f, 3f)
+            lineTo(13.4f, 3f)
+            lineTo(13.4f, 12f)
+            lineTo(10.6f, 12f)
+            close()
+            // The head.
+            moveTo(6.8f, 10.4f)
+            lineTo(12f, 16.4f)
+            lineTo(17.2f, 10.4f)
+            close()
+            // The floor the arrow lands on.
+            moveTo(5f, 18.6f)
+            lineTo(19f, 18.6f)
+            lineTo(19f, 21f)
+            lineTo(5f, 21f)
+            close()
+        }
+    }.build()
+}
+
+/**
  * One mailbox's recordings.
  *
  * Tapping a recording downloads it into the cache and plays it. Export and the
@@ -458,6 +498,9 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
     var plan by remember { mutableStateOf(LookBack(days = 0, more = false)) }
     var paused by remember { mutableStateOf(false) }
     var playingLabel by remember { mutableStateOf("") }
+    // Which recordings are already on the device. Derived from the cache rather than stored,
+    // so a file the OS evicted stops claiming to be here without anything having to notice.
+    var downloaded by remember { mutableStateOf<Set<String>>(emptySet()) }
     // A recording that will not play is that recording's problem, not the screen's, so the
     // failure is kept against its own row instead of being shown at the top of the list.
     var failures by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
@@ -467,9 +510,27 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
     // this a recording keeps playing over the mailbox list.
     DisposableEffect(Unit) { onDispose { player.stop() } }
 
+    /**
+     * Works out which recordings are already on the device.
+     *
+     * The cache is the OS's to empty, so this is recomputed rather than remembered
+     * permanently: a file evicted between two visits stops showing as downloaded.
+     */
+    suspend fun noteDownloaded(source: List<VoiceMailRow>) {
+        downloaded = withContext(Dispatchers.IO) {
+            source
+                .filter {
+                    container.voicemailCache.existing(it.mailbox, it.folder, it.messageNum) != null
+                }
+                .map { "${it.folder}/${it.messageNum}" }
+                .toSet()
+        }
+    }
+
     suspend fun loadCached() {
         rows = withContext(Dispatchers.IO) { container.store.voicemails(mailbox) }
         plan = container.sync.voicemailLookBackPlan(mailbox)
+        noteDownloaded(rows)
         loaded = true
     }
 
@@ -483,6 +544,7 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
         }
         rows = withContext(Dispatchers.IO) { container.store.voicemails(mailbox) }
         plan = container.sync.voicemailLookBackPlan(mailbox)
+        noteDownloaded(rows)
         loaded = true
         busy = false
     }
@@ -516,6 +578,7 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
                 playing = key
                 playingLabel = row.callerId.ifBlank { "Unknown caller" }
                 failures = failures - key
+                downloaded = downloaded + key
             } catch (e: Exception) {
                 failures = failures + (key to (e.message ?: "could not fetch that recording"))
             }
@@ -531,6 +594,7 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
                 container.sync.voicemailLookBack(mailbox)
                 rows = withContext(Dispatchers.IO) { container.store.voicemails(mailbox) }
                 plan = container.sync.voicemailLookBackPlan(mailbox)
+                noteDownloaded(rows)
                 status = null
             } catch (e: Exception) {
                 status = e.message ?: "could not load older recordings"
@@ -566,34 +630,39 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
             // otherwise has to be replayed from the top to hear one part of it again.
             if (playing != null) {
                 Surface(tonalElevation = 3.dp) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            playingLabel,
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.weight(1f).padding(start = 8.dp),
-                        )
-                        TextButton(onClick = { player.seekBy(-5) }) { Text("−5s") }
-                        TextButton(
-                            onClick = {
-                                if (paused) player.resume() else player.pause()
-                                paused = !paused
-                            },
+                    Column {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text(if (paused) "Play" else "Pause")
+                            Text(
+                                playingLabel,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f).padding(start = 8.dp),
+                            )
+                            TextButton(onClick = { player.seekBy(-5) }) { Text("−5s") }
+                            TextButton(
+                                onClick = {
+                                    if (paused) player.resume() else player.pause()
+                                    paused = !paused
+                                },
+                            ) {
+                                Text(if (paused) "Play" else "Pause")
+                            }
+                            TextButton(onClick = { player.seekBy(5) }) { Text("+5s") }
+                            TextButton(
+                                onClick = {
+                                    player.stop()
+                                    playing = null
+                                    paused = false
+                                },
+                            ) {
+                                Text("Stop")
+                            }
                         }
-                        TextButton(onClick = { player.seekBy(5) }) { Text("+5s") }
-                        TextButton(
-                            onClick = {
-                                player.stop()
-                                playing = null
-                                paused = false
-                            },
-                        ) {
-                            Text("Stop")
-                        }
+                        // The controls sat flush against the tab strip and read as part of
+                        // it. A rule between them keeps the two things separate.
+                        HorizontalDivider()
                     }
                 }
             }
@@ -621,6 +690,7 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
                         row = row,
                         playing = playing == key,
                         fetching = fetching == key,
+                        downloaded = key in downloaded,
                         failure = failures[key],
                         onClick = { toggle(row) },
                     )
@@ -649,6 +719,7 @@ private fun VoiceMailItem(
     row: VoiceMailRow,
     playing: Boolean,
     fetching: Boolean,
+    downloaded: Boolean,
     failure: String?,
     onClick: () -> Unit,
 ) {
@@ -664,6 +735,18 @@ private fun VoiceMailItem(
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.weight(1f),
             )
+            // A download glyph before the duration means the audio is on the device, so this
+            // tap will be instant and will work with no network. The subtitle already
+            // carries "new", so the position next to the duration keeps the two apart.
+            if (downloaded) {
+                Icon(
+                    DownloadGlyph,
+                    contentDescription = "Downloaded",
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.width(6.dp))
+            }
             Text(
                 when {
                     fetching -> "Downloading…"
