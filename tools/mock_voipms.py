@@ -115,6 +115,10 @@ STATE = {
     # a real account sends for a recording it cannot serve at that moment, and it succeeds
     # on the next request, so the app retries. Nothing else in the mock can reproduce it.
     "audio_false_remaining": 0,
+    # When on, the list call drops the text of any row containing non-ASCII, which is what a
+    # real account did for a message that was a single emoji while the by-id call still had
+    # it. Off by default because it is a simulation of a vendor quirk, not normal behaviour.
+    "strip_list_bodies": False,
 }
 
 # The vendor doc's own example shows "hello+john", which implies the API urlencodes
@@ -434,12 +438,18 @@ class Handler(BaseHTTPRequestHandler):
                 % STATE["audio_false_remaining"]
             )
             return self.send_json({"count": STATE["audio_false_remaining"]})
+        if route == "/control/strip-list-bodies":
+            with LOCK:
+                STATE["strip_list_bodies"] = fields.get("on", "1") not in ("0", "no", "false")
+            self.log_api(f"control: strip_list_bodies={STATE['strip_list_bodies']}")
+            return self.send_json({"strip_list_bodies": STATE["strip_list_bodies"]})
         if route == "/control/reset":
             with LOCK:
                 STATE["fail_code"] = 0
                 STATE["fail_remaining"] = 0
                 STATE["delay_ms"] = 0
                 STATE["audio_false_remaining"] = 0
+                STATE["strip_list_bodies"] = False
             seed()
             self.log_api("control: reset")
             return self.send_json({"reset": True})
@@ -495,6 +505,10 @@ class Handler(BaseHTTPRequestHandler):
             out = []
             for m in rows:
                 row = {k: v for k, v in m.items() if k != "media"}
+                if STATE["strip_list_bodies"] and any(ord(ch) > 127 for ch in row.get("message", "")):
+                    # The vendor quirk: the row is listed, its text is not.
+                    self.log_api(f"getMMS id={row['id']} body dropped (non-ASCII)")
+                    row["message"] = ""
                 for index, name in enumerate(m.get("media", [])[:3], start=1):
                     row[f"col_media{index}"] = f"http://{host}/media/{name}"
                 out.append(row)
