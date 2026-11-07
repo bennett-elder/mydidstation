@@ -181,8 +181,11 @@ jobs:
           Version scheme: see scripts/version.sh. The committed
           android/version.properties is what F-Droid builds.
           NOTES
-          flags=(--title "$NAME" --notes-file "$RUNNER_TEMP/notes.md" --generate-notes --latest)
-          if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+          flags=(--title "$NAME" --notes-file "$RUNNER_TEMP/notes.md" --generate-notes)
+          # A prerelease cannot be marked latest: the API answers "Latest release cannot be
+          # draft or prerelease", which is what a push build hits every time. Only a real
+          # release, which only a tag push produces, gets the flag.
+          if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); else flags+=(--latest); fi
           # A tag build already has its tag. A branch push still has to create one, and it
           # has to point at the commit that was just built.
           if [ "${GITHUB_REF_TYPE:-}" != "tag" ]; then flags+=(--target "$GITHUB_SHA"); fi
