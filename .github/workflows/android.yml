@@ -4,8 +4,16 @@ on:
   push:
     branches: [main]
     tags: ['v*']
-    paths-ignore:
-      - '**.md'
+    # Everything the app is built from, minus prose: a Markdown edit inside android/ cannot
+    # change the APK, and nothing outside android/ can either. Negative patterns take
+    # precedence because they come last. Path filters are not evaluated for tag pushes, so a
+    # tag still always builds.
+    paths:
+      - 'android/**'
+      - '!android/**/*.md'
+      # The pipeline tests itself. Without this a YAML mistake here stays invisible until the
+      # next push that touches android/ happens to run it.
+      - '.github/workflows/android.yml'
   workflow_dispatch:
     inputs:
       create_release:
