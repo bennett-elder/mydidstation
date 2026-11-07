@@ -18,10 +18,13 @@ class App : Application() {
     }
 }
 
-class Container(context: Context) {
-    val settings = Settings(context)
-    val store = Store(context)
-    val api = VoipMs(settings)
-    val notifier = AndroidNotifier(context)
-    val sync = Sync(store, api, notifier)
+class Container(private val context: Context) {
+    // Lazy so that starting the app touches no database, no network and no Keystore.
+    // A launch must survive a broken Keystore, and the tests have to be able to build a
+    // container on a JVM with no AndroidKeyStore provider at all.
+    val settings by lazy { Settings(context) }
+    val store by lazy { Store(context) }
+    val api by lazy { VoipMs(settings) }
+    val notifier by lazy { AndroidNotifier(context) }
+    val sync by lazy { Sync(store, api, notifier) }
 }

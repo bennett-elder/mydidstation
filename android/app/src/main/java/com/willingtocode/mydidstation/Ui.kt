@@ -1090,8 +1090,10 @@ fun SettingsScreen(container: Container, onDone: () -> Unit) {
                         busy = true
                         status = null
                         found = null
-                        container.settings.save(email, password)
                         try {
+                            // Sealing can fail when the device has no usable Keystore, so
+                            // this belongs in the same try as the network call.
+                            container.settings.save(email, password)
                             val count = container.sync.discoverDids()
                             found = count
                             status = if (count == 1) "Found 1 number." else "Found $count numbers."

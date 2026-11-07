@@ -1,14 +1,13 @@
 package com.willingtocode.mydidstation
 
 import android.content.Context
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
+import org.json.JSONObject
 
 /**
  * The two answers the API layer needs, and nothing else.
  *
- * An interface because constructing the real [Settings] needs a Keystore-backed
- * preference store, and that is the only thing between [VoipMs] and a unit test.
+ * An interface so [VoipMs] never needs a [Context], which is what makes the API layer
+ * testable.
  */
 interface ApiSettings {
     fun credentials(): Pair<String, String>?
@@ -16,28 +15,60 @@ interface ApiSettings {
     fun endpoint(): String
 }
 
-/** API credentials, encrypted at rest with a Keystore-backed key. */
-class Settings(context: Context) : ApiSettings {
+/**
+ * Everything the app remembers, split in two.
+ *
+ * The API credentials are one sealed blob, read and written through [SecretBox]. Nothing
+ * else stored here is secret, so it sits in the same preference file and can be read by
+ * the settings screen and the poll worker without touching the Keystore. That split is
+ * why constructing this class cannot fail: no key is created until a credential is
+ * actually read or written.
+ */
+class Settings(
+    private val context: Context,
+    private val box: SecretBox = KeystoreBox(),
+) : ApiSettings {
 
-    private val prefs = EncryptedSharedPreferences.create(
-        context,
-        "secure",
-        MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-    )
+    private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
+    init {
+        // The old EncryptedSharedPreferences ciphertext cannot be opened without the key
+        // that library owned, so the file goes and the credentials get asked for once.
+        runCatching { context.deleteSharedPreferences(LEGACY_PREFS) }
+    }
+
+    /** Both halves or neither: they are one blob, not two independent values. */
     fun save(email: String, password: String) {
-        prefs.edit().putString(KEY_EMAIL, email.trim()).putString(KEY_PASSWORD, password).apply()
+        val payload = JSONObject()
+            .put(FIELD_EMAIL, email.trim())
+            .put(FIELD_PASSWORD, password)
+            .toString()
+        prefs.edit().putString(KEY_CREDENTIALS, box.seal(payload)).apply()
     }
 
     override fun credentials(): Pair<String, String>? {
-        val email = prefs.getString(KEY_EMAIL, null)?.takeIf { it.isNotBlank() } ?: return null
-        val password = prefs.getString(KEY_PASSWORD, null)?.takeIf { it.isNotEmpty() } ?: return null
+        val sealed = prefs.getString(KEY_CREDENTIALS, null) ?: return null
+        val json = box.open(sealed) ?: return forget()
+        val parsed = runCatching { JSONObject(json) }.getOrNull() ?: return forget()
+        val email = parsed.optString(FIELD_EMAIL).takeIf { it.isNotBlank() } ?: return null
+        val password = parsed.optString(FIELD_PASSWORD).takeIf { it.isNotEmpty() } ?: return null
         return email to password
     }
 
-    fun email(): String = prefs.getString(KEY_EMAIL, "").orEmpty()
+    /**
+     * A blob that will not open is dropped, so a damaged value is not retried on every
+     * poll. That covers a corrupted file and a key the device no longer holds.
+     */
+    private fun forget(): Pair<String, String>? {
+        prefs.edit().remove(KEY_CREDENTIALS).apply()
+        return null
+    }
+
+    fun email(): String {
+        val sealed = prefs.getString(KEY_CREDENTIALS, null) ?: return ""
+        val json = box.open(sealed) ?: return ""
+        return runCatching { JSONObject(json).optString(FIELD_EMAIL) }.getOrDefault("")
+    }
 
     /** When the background poll last finished, so the UI can estimate the next one. */
     fun lastPollAt(): Long = prefs.getLong(KEY_LAST_POLL, 0L)
@@ -91,18 +122,25 @@ class Settings(context: Context) : ApiSettings {
         prefs.edit().putBoolean(KEY_NOTIFY_ASKED, true).apply()
     }
 
-    private companion object {
-        const val KEY_EMAIL = "api_email"
-        const val KEY_PASSWORD = "api_password"
-        const val KEY_LAST_POLL = "last_poll_at"
-        const val KEY_ENDPOINT = "api_endpoint"
-        const val DEFAULT_ENDPOINT = "https://voip.ms/api/v1/rest.php"
-        const val KEY_FOREGROUND_SECONDS = "foreground_seconds"
-        const val KEY_BACKGROUND_MINUTES = "background_minutes"
-        const val KEY_NOTIFY = "notify_incoming"
-        const val KEY_NOTIFY_ASKED = "notify_permission_asked"
+    internal companion object {
+        const val PREFS = "settings"
 
-        const val DEFAULT_FOREGROUND_SECONDS = 60
-        const val DEFAULT_BACKGROUND_MINUTES = 15
+        /** Where the encrypted file lived before this class stopped using that library. */
+        const val LEGACY_PREFS = "secure"
+
+        const val KEY_CREDENTIALS = "credentials"
+
+        private const val FIELD_EMAIL = "email"
+        private const val FIELD_PASSWORD = "password"
+        private const val KEY_LAST_POLL = "last_poll_at"
+        private const val KEY_ENDPOINT = "api_endpoint"
+        private const val KEY_FOREGROUND_SECONDS = "foreground_seconds"
+        private const val KEY_BACKGROUND_MINUTES = "background_minutes"
+        private const val KEY_NOTIFY = "notify_incoming"
+        private const val KEY_NOTIFY_ASKED = "notify_permission_asked"
+
+        const val DEFAULT_ENDPOINT = "https://voip.ms/api/v1/rest.php"
+        private const val DEFAULT_FOREGROUND_SECONDS = 60
+        private const val DEFAULT_BACKGROUND_MINUTES = 15
     }
 }
