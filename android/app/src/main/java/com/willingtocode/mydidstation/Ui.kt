@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.text.format.DateFormat as AndroidDateFormat
@@ -12,6 +13,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -763,6 +765,22 @@ private fun AttachmentLine(container: Container, url: String) {
         return
     }
 
+    // Images are drawn here. Audio plays here, because a voice note is the one non-image
+    // attachment worth hearing in place. Everything else is handed to another app rather than
+    // being reimplemented: whoever sent a video probably already has something that plays it,
+    // and the system already knows what that is.
+    when (loaded.type.kind) {
+        MediaKind.Audio -> {
+            AudioAttachmentRow(loaded)
+            return
+        }
+        MediaKind.Video, MediaKind.Other -> {
+            OpenAttachmentRow(loaded)
+            return
+        }
+        MediaKind.Image -> Unit
+    }
+
     // Height-capped so one tall photo cannot fill the screen and hide the conversation, and
     // fitted rather than cropped: a crop hides part of what someone sent, which is worse than
     // a smaller picture. A tap opens it whole for detail.
@@ -802,6 +820,73 @@ private fun AttachmentLine(container: Container, url: String) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun AudioAttachmentRow(loaded: MediaResult.Loaded) {
+    val player = remember { VoicemailPlayer() }
+    var playing by remember { mutableStateOf(false) }
+    // Nothing else owns this player, so leaving the screen has to stop it.
+    DisposableEffect(Unit) { onDispose { player.stop() } }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        TextButton(
+            onClick = {
+                if (playing) {
+                    player.stop()
+                    playing = false
+                } else {
+                    player.play(loaded.file) { playing = false }
+                    playing = true
+                }
+            },
+        ) {
+            Text(if (playing) "Stop" else "Play")
+        }
+        Text(
+            "audio · ${(loaded.file.length() + 1023) / 1024} KB",
+            style = MaterialTheme.typography.labelSmall,
+        )
+    }
+}
+
+/**
+ * Anything this app will not draw or play, offered to whatever can.
+ *
+ * A `content://` URI is required: passing a `file://` to another app throws on Android 7 and
+ * later, and the read permission has to travel with the intent or the receiving app gets a
+ * handle it is not allowed to open.
+ */
+@Composable
+private fun OpenAttachmentRow(loaded: MediaResult.Loaded) {
+    val context = LocalContext.current
+    val mime = when (loaded.type) {
+        MediaType.Mp4 -> "video/mp4"
+        MediaType.ThreeGp -> "video/3gpp"
+        MediaType.Midi -> "audio/midi"
+        MediaType.Pdf -> "application/pdf"
+        else -> "application/octet-stream"
+    }
+    val label = when (loaded.type.kind) {
+        MediaKind.Video -> "video"
+        else -> loaded.type.name.lowercase()
+    }
+    TextButton(
+        onClick = {
+            val uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.files",
+                loaded.file,
+            )
+            val intent = Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, mime)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            // No handler is possible on a phone with nothing installed for the type, and that
+            // is not an error worth a dialog.
+            runCatching { context.startActivity(intent) }
+        },
+    ) {
+        Text("Open $label · ${(loaded.file.length() + 1023) / 1024} KB")
     }
 }
 

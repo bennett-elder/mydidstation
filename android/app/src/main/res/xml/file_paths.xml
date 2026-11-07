@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  What the FileProvider may hand to another app: only downloaded attachments, which live in
+  the cache directory. Nothing else in this app's storage is exposed by this provider.
+-->
+<paths>
+    <cache-path name="mms" path="mms/" />
+</paths>
