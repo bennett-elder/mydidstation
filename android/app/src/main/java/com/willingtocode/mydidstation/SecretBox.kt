@@ -1,13 +1,44 @@
 package com.willingtocode.mydidstation
 
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import java.security.KeyStore
+import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+
+/**
+ * What came back from [SecretBox.open].
+ *
+ * Four outcomes, not a nullable string, because "the value is bad" and "the Keystore is
+ * not answering" call for opposite responses. Collapsing them means a device whose
+ * Keystore is briefly unavailable gets its credentials deleted.
+ */
+sealed interface Unsealed {
+
+    /** The value, decrypted. */
+    data class Ok(val value: String) : Unsealed
+
+    /** Nothing is stored under this purpose. */
+    data object Missing : Unsealed
+
+    /**
+     * The value exists and cannot be opened: damaged, tampered with, sealed for another
+     * purpose, or sealed under a key this device no longer holds. Retrying will not help,
+     * so the caller may drop it.
+     */
+    data object Unreadable : Unsealed
+
+    /**
+     * The Keystore could not be reached, which says nothing about the value. The caller
+     * must keep it and try again later.
+     */
+    data object Unavailable : Unsealed
+}
 
 /**
  * Encrypts one short string so it can sit in a preference file.
@@ -23,11 +54,8 @@ interface SecretBox {
      */
     fun seal(purpose: String, plain: String): String
 
-    /**
-     * Returns null when the value is damaged, was sealed for a different [purpose], or
-     * was sealed under a key that is gone.
-     */
-    fun open(purpose: String, sealed: String): String?
+    /** Opens a value sealed for [purpose]. See [Unsealed] for the four outcomes. */
+    fun open(purpose: String, sealed: String): Unsealed
 }
 
 /**
@@ -60,52 +88,73 @@ class KeystoreBox : SecretBox {
         return Base64.encodeToString(out, Base64.NO_WRAP)
     }
 
-    override fun open(purpose: String, sealed: String): String? = try {
-        val raw = Base64.decode(sealed, Base64.NO_WRAP)
+    override fun open(purpose: String, sealed: String): Unsealed {
+        val raw = runCatching { Base64.decode(sealed, Base64.NO_WRAP) }.getOrNull()
+            ?: return Unsealed.Unreadable
         if (raw.size < 2 + MIN_IV_BYTES + TAG_BYTES || raw[0] != VERSION) {
-            null
-        } else {
-            val ivSize = raw[1].toInt()
-            if (ivSize <= 0 || raw.size < 2 + ivSize + TAG_BYTES) {
-                null
-            } else {
-                val iv = raw.copyOfRange(2, 2 + ivSize)
-                val body = raw.copyOfRange(2 + ivSize, raw.size)
-                val cipher = Cipher.getInstance(TRANSFORMATION)
-                cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(TAG_BITS, iv))
-                cipher.updateAAD(purpose.toByteArray(Charsets.UTF_8))
-                String(cipher.doFinal(body), Charsets.UTF_8)
-            }
+            return Unsealed.Unreadable
         }
-    } catch (_: Exception) {
-        // Damaged, sealed under another purpose or another key, or the key was
-        // invalidated by the system. All of those mean "no credentials", and none of
-        // them may crash a poll.
-        null
+        val ivSize = raw[1].toInt()
+        if (ivSize <= 0 || raw.size < 2 + ivSize + TAG_BYTES) return Unsealed.Unreadable
+        val iv = raw.copyOfRange(2, 2 + ivSize)
+        val body = raw.copyOfRange(2 + ivSize, raw.size)
+
+        val key = runCatching { key() }.getOrElse {
+            // No usable Keystore, which says nothing about the stored value.
+            return Unsealed.Unavailable
+        }
+        return try {
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(TAG_BITS, iv))
+            cipher.updateAAD(purpose.toByteArray(Charsets.UTF_8))
+            Unsealed.Ok(String(cipher.doFinal(body), Charsets.UTF_8))
+        } catch (_: AEADBadTagException) {
+            // Tampered, sealed for another purpose, or a key that no longer matches.
+            Unsealed.Unreadable
+        } catch (_: KeyPermanentlyInvalidatedException) {
+            Unsealed.Unreadable
+        } catch (_: Exception) {
+            // The key is there but the operation could not run. Not the value's fault.
+            Unsealed.Unavailable
+        }
     }
 
     private fun key(): SecretKey {
         val store = KeyStore.getInstance(PROVIDER).apply { load(null) }
         existing(store)?.let { return it }
-        // A half-created or invalidated entry would block generation, so clear it first.
-        runCatching { store.deleteEntry(ALIAS) }
-        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, PROVIDER)
-        generator.init(
-            KeyGenParameterSpec.Builder(
-                ALIAS,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
-            )
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(KEY_BITS)
-                // The default, stated so it cannot be lost: the Keystore picks the IV
-                // and refuses a caller-supplied one, which is what makes GCM IV reuse
-                // impossible from this code.
-                .setRandomizedEncryptionRequired(true)
-                .build(),
-        )
-        return generator.generateKey()
+        return generate(store)
     }
+
+    /**
+     * Creates the key. An entry that exists but cannot be used blocks generation, so it is
+     * cleared once and the attempt repeated. Nothing is deleted unless an alias is really
+     * there: a Keystore that was merely unreachable must not cost the user credentials.
+     */
+    private fun generate(store: KeyStore): SecretKey = try {
+        generator().generateKey()
+    } catch (first: Exception) {
+        if (!store.containsAlias(ALIAS)) throw first
+        store.deleteEntry(ALIAS)
+        generator().generateKey()
+    }
+
+    private fun generator(): KeyGenerator =
+        KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, PROVIDER).apply {
+            init(
+                KeyGenParameterSpec.Builder(
+                    ALIAS,
+                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+                )
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .setKeySize(KEY_BITS)
+                    // The default, stated so it cannot be lost: the Keystore picks the IV
+                    // and refuses a caller-supplied one, which is what makes GCM IV reuse
+                    // impossible from this code.
+                    .setRandomizedEncryptionRequired(true)
+                    .build(),
+            )
+        }
 
     private fun existing(store: KeyStore): SecretKey? = try {
         (store.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.secretKey

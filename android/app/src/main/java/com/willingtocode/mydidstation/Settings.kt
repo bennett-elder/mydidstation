@@ -51,7 +51,13 @@ class Settings(
 
     override fun credentials(): Pair<String, String>? {
         val sealed = prefs.getString(KEY_CREDENTIALS, null) ?: return null
-        val json = box.open(PURPOSE, sealed) ?: return forget()
+        // Only Unreadable justifies deleting the value. Unavailable means the Keystore did
+        // not answer, and the value may be perfectly good on the next poll.
+        val json = when (val opened = box.open(PURPOSE, sealed)) {
+            is Unsealed.Ok -> opened.value
+            Unsealed.Missing, Unsealed.Unavailable -> return null
+            Unsealed.Unreadable -> return forget()
+        }
         val parsed = runCatching { JSONObject(json) }.getOrNull() ?: return forget()
         val email = parsed.optString(FIELD_EMAIL).takeIf { it.isNotBlank() } ?: return null
         val password = parsed.optString(FIELD_PASSWORD).takeIf { it.isNotEmpty() } ?: return null
@@ -59,8 +65,8 @@ class Settings(
     }
 
     /**
-     * A blob that will not open is dropped, so a damaged value is not retried on every
-     * poll. That covers a corrupted file and a key the device no longer holds.
+     * Drops a value that is confirmed unreadable, so it is not retried on every poll. Only
+     * call this when the box said the value itself is bad.
      */
     private fun forget(): Pair<String, String>? {
         prefs.edit().remove(KEY_CREDENTIALS).apply()
@@ -69,8 +75,9 @@ class Settings(
 
     fun email(): String {
         val sealed = prefs.getString(KEY_CREDENTIALS, null) ?: return ""
-        val json = box.open(PURPOSE, sealed) ?: return ""
-        return runCatching { JSONObject(json).optString(FIELD_EMAIL) }.getOrDefault("")
+        val opened = box.open(PURPOSE, sealed)
+        if (opened !is Unsealed.Ok) return ""
+        return runCatching { JSONObject(opened.value).optString(FIELD_EMAIL) }.getOrDefault("")
     }
 
     /** When the background poll last finished, so the UI can estimate the next one. */

@@ -32,7 +32,12 @@ class SettingsTest {
      */
     private class FakeBox(private val prefix: String = "fake:") : SecretBox {
 
-        var failToOpen = false
+        /** The value is there and will not open. */
+        var corrupt = false
+
+        /** The Keystore is not answering, which says nothing about the value. */
+        var unavailable = false
+
         var failToSeal = false
 
         override fun seal(purpose: String, plain: String): String {
@@ -40,12 +45,14 @@ class SettingsTest {
             return head(purpose) + Base64.encodeToString(plain.toByteArray(), Base64.NO_WRAP)
         }
 
-        override fun open(purpose: String, sealed: String): String? {
+        override fun open(purpose: String, sealed: String): Unsealed {
+            if (unavailable) return Unsealed.Unavailable
             val head = head(purpose)
-            if (failToOpen || !sealed.startsWith(head)) return null
-            return runCatching {
+            if (corrupt || !sealed.startsWith(head)) return Unsealed.Unreadable
+            val plain = runCatching {
                 String(Base64.decode(sealed.removePrefix(head), Base64.NO_WRAP))
-            }.getOrNull()
+            }.getOrNull() ?: return Unsealed.Unreadable
+            return Unsealed.Ok(plain)
         }
 
         private fun head(purpose: String) = prefix + purpose + ":"
@@ -100,7 +107,7 @@ class SettingsTest {
         val box = FakeBox()
         val s = settings(box)
         s.save("user@example.com", "hunter2")
-        box.failToOpen = true
+        box.corrupt = true
         assertNull(s.credentials())
     }
 
@@ -109,9 +116,30 @@ class SettingsTest {
         val box = FakeBox()
         val s = settings(box)
         s.save("user@example.com", "hunter2")
-        box.failToOpen = true
+        box.corrupt = true
         s.credentials()
         assertFalse(raw().contains(Settings.KEY_CREDENTIALS))
+    }
+
+    @Test
+    fun `a value is kept while the keystore is unavailable`() {
+        val box = FakeBox()
+        val s = settings(box)
+        s.save("user@example.com", "hunter2")
+        box.unavailable = true
+        assertNull(s.credentials())
+        assertTrue(raw().contains(Settings.KEY_CREDENTIALS))
+    }
+
+    @Test
+    fun `the credentials come back when the keystore does`() {
+        val box = FakeBox()
+        val s = settings(box)
+        s.save("user@example.com", "hunter2")
+        box.unavailable = true
+        assertNull(s.credentials())
+        box.unavailable = false
+        assertEquals("user@example.com" to "hunter2", s.credentials())
     }
 
     @Test
