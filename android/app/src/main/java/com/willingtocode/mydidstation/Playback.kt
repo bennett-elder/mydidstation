@@ -50,6 +50,9 @@ class VoicemailCache(private val root: File) {
 
     fun sizeBytes(): Long = files().sumOf { it.length() }
 
+    /** How many recordings are on the device, for the storage row. */
+    fun count(): Int = files().size
+
     fun clear() {
         files().forEach { it.delete() }
     }

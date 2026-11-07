@@ -890,6 +890,101 @@ private fun OpenAttachmentRow(loaded: MediaResult.Loaded) {
     }
 }
 
+/**
+ * What the caches are holding, and a way to empty them.
+ *
+ * Two rows because the two caches answer different questions — "can I hear that recording
+ * again" and "is that picture still here" — and the sizes are read from disk rather than
+ * remembered, since the OS may empty either at any time without telling us.
+ */
+@Composable
+private fun StorageSection(container: Container) {
+    val scope = rememberCoroutineScope()
+    var voicemail by remember { mutableStateOf(0L to 0) }
+    var attachments by remember { mutableStateOf(0L to 0) }
+
+    fun reload() {
+        scope.launch {
+            val vm = withContext(Dispatchers.IO) {
+                container.voicemailCache.sizeBytes() to container.voicemailCache.count()
+            }
+            val media = withContext(Dispatchers.IO) {
+                container.media.sizeBytes() to container.media.count()
+            }
+            voicemail = vm
+            attachments = media
+        }
+    }
+
+    LaunchedEffect(Unit) { reload() }
+
+    fun label(pair: Pair<Long, Int>): String {
+        val (bytes, files) = pair
+        if (files == 0) return "nothing cached"
+        val count = if (files == 1) "1 file" else "$files files"
+        return when {
+            // Bytes and kilobytes are shown as themselves. A 96 KB recording rounded to
+            // "0.0 MB" reads as an empty cache, which is the one thing this row must not say.
+            bytes < 1024 -> "$bytes B · $count"
+            bytes < 1024 * 1024 -> "${bytes / 1024} KB · $count"
+            else -> {
+                val megabytes = bytes / (1024.0 * 1024.0)
+                if (megabytes < 10.0) {
+                    String.format(Locale.getDefault(), "%.1f MB · %s", megabytes, count)
+                } else {
+                    "${megabytes.toLong()} MB · $count"
+                }
+            }
+        }
+    }
+
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+        Text("Storage", style = MaterialTheme.typography.titleMedium)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Voicemail audio", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    label(voicemail),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            TextButton(
+                onClick = {
+                    scope.launch {
+                        withContext(Dispatchers.IO) { container.voicemailCache.clear() }
+                        reload()
+                    }
+                },
+                enabled = voicemail.second > 0,
+            ) {
+                Text("Clear")
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Attachments", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    label(attachments),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            TextButton(
+                onClick = {
+                    scope.launch {
+                        withContext(Dispatchers.IO) { container.media.clear() }
+                        reload()
+                    }
+                },
+                enabled = attachments.second > 0,
+            ) {
+                Text("Clear")
+            }
+        }
+    }
+}
+
 @Composable
 private fun VoiceMailItem(
     row: VoiceMailRow,
@@ -1880,6 +1975,8 @@ fun SettingsScreen(container: Container, onDone: () -> Unit) {
                 }
             }
 
+            HorizontalDivider()
+            StorageSection(container)
             HorizontalDivider()
             Text(
                 "Sync",

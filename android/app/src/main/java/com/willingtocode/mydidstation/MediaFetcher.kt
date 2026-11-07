@@ -301,6 +301,16 @@ class MediaFetcher(
         MediaResult.Failed("attachment too large (over ${MAX_BYTES / (1024 * 1024)} MB)")
 
     /** Keeps the cache under the cap by dropping the oldest files, never the newest. */
+    fun sizeBytes(): Long = dir().listFiles()?.filter { it.isFile }?.sumOf { it.length() } ?: 0L
+
+    /** How many attachments are on the device, for the storage row. */
+    fun count(): Int = dir().listFiles()?.count { it.isFile } ?: 0
+
+    /** Removes every cached attachment. A file being drawn is the caller's concern. */
+    fun clear() {
+        dir().listFiles()?.forEach { it.delete() }
+    }
+
     private fun trim(keep: File) {
         val files = dir().listFiles()?.filter { it.isFile } ?: return
         var total = files.sumOf { it.length() }
