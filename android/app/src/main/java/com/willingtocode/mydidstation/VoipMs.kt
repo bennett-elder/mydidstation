@@ -210,10 +210,23 @@ class VoipMs(private val settings: ApiSettings) {
         return out
     }
 
-    /** The recordings in one folder, or in every folder when none is named. */
-    suspend fun voicemails(mailbox: String, folder: String? = null): List<VoiceMailInfo> {
+    /**
+     * The recordings in one folder, or in every folder when none is named.
+     *
+     * A date range is not optional in practice. Without one the API is asked for the
+     * mailbox's entire history, which produces the same Cloudflare 522 that a 92-day text
+     * window does, so callers pass a bounded range.
+     */
+    suspend fun voicemails(
+        mailbox: String,
+        folder: String? = null,
+        fromSec: Long? = null,
+        toSec: Long? = null,
+    ): List<VoiceMailInfo> {
         val params = mutableListOf("method" to "getVoicemailMessages", "mailbox" to mailbox)
         if (folder != null) params += "folder" to folder
+        if (fromSec != null) params += "date_from" to apiDate(fromSec)
+        if (toSec != null) params += "date_to" to apiDate(toSec)
         val json = call(*params.toTypedArray())
         if (json.optString("status") != "success") {
             if (isEmptyStatus(json)) return emptyList()
@@ -291,6 +304,13 @@ class VoipMs(private val settings: ApiSettings) {
     /** A `no_...` status means there is simply nothing there, which is not a failure. */
     private fun isEmptyStatus(json: JSONObject): Boolean =
         json.optString("status").startsWith("no_")
+
+    /**
+     * The voicemail date parameters are dates, not timestamps, and they are read in the
+     * same fixed offset everything else is (D-API timezone).
+     */
+    private fun apiDate(epochSeconds: Long): String =
+        dateFormat.format(Date(epochSeconds * 1000))
 
     /** Whether a base64 payload is small enough to decode at all. */
     internal fun audioLengthAllowed(encodedChars: Int): Boolean =

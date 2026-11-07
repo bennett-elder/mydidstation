@@ -30,14 +30,17 @@ class Sync(
     }
 
     /**
-     * Refreshes one mailbox's recordings.
+     * Refreshes one mailbox's recordings over the same 30-day window the text path uses.
      *
-     * No folder is named, so the API returns everything it holds for the mailbox, which is
-     * what lets one screen show INBOX, Urgent and Old together. Opening a mailbox is what
-     * fetches them, the same way opening a number is what fetches its texts (D8).
+     * The bound is not a preference. Asking for the mailbox's whole history is what
+     * produces the Cloudflare 522 this project already hit with 90-day text windows, so
+     * `MAX_RANGE_SECONDS` is reused rather than a second number being invented here.
+     * Recordings older than the window need a load-more, which does not exist yet.
      */
     suspend fun refreshVoicemails(mailbox: String): Int = withContext(Dispatchers.IO) {
-        val found = api.voicemails(mailbox)
+        val to = System.currentTimeMillis() / 1000
+        val from = to - MAX_RANGE_SECONDS
+        val found = api.voicemails(mailbox, fromSec = from, toSec = to)
         found.forEach {
             store.putVoicemail(
                 mailbox = it.mailbox.ifBlank { mailbox },

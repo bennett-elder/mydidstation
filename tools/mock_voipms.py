@@ -444,8 +444,8 @@ class Handler(BaseHTTPRequestHandler):
                         and (not folder or v["folder"] == folder)
                         and date_from <= v["date"] <= date_to]
             rows.sort(key=lambda v: (v["date"], v["message_num"]))
-            self.log_api(f"getVoicemailMessages mailbox={mailbox} "
-                         f"folder={folder or '*'} -> {len(rows)} row(s)")
+            self.log_api(f"getVoicemailMessages mailbox={mailbox} folder={folder or '*'} "
+                         f"{date_from}..{date_to} -> {len(rows)} row(s)")
             return self.send_json({"status": "success",
                                    "messages": [public_vm(v) for v in rows]})
 

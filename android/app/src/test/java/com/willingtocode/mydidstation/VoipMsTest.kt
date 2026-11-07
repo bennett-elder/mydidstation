@@ -263,6 +263,18 @@ class VoipMsTest {
     }
 
     @Test
+    fun `voicemail requests carry a date range in the API's own format`() = runBlocking {
+        reply("""{"status":"success","messages":[]}""")
+        api().voicemails("1001", folder = "INBOX", fromSec = 0, toSec = 0)
+        val body = server.takeRequest().body.readUtf8()
+        assertTrue("date_from missing from $body", body.contains("date_from"))
+        assertTrue("date_to missing from $body", body.contains("date_to"))
+        // Epoch 0 read at the fixed -5 offset is the previous day, not 1970-01-01, which
+        // is the whole reason this goes through the same formatter as everything else.
+        assertTrue("wrong date for epoch 0: $body", body.contains("1969-12-31"))
+    }
+
+    @Test
     fun `marking listened sends the documented parameters`() = runBlocking {
         reply("""{"status":"success"}""")
         api().markVoicemailListened("1001", "INBOX", 7, listened = true)
