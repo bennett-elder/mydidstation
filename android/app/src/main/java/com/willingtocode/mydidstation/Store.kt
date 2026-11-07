@@ -241,6 +241,13 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
             // remembers that, instead of the app asking again on every poll.
             db.execSQL("ALTER TABLE message ADD COLUMN body_checked INTEGER NOT NULL DEFAULT 0")
         }
+        if (oldVersion < 10) {
+            // v10 clears every verification flag. v9 accepted the first row of a by-id answer
+            // without checking which message it described, so any row verified under that
+            // rule may hold another message's text — and because it was marked checked, no
+            // later pass would look at it again. One re-check each repairs the damage.
+            db.execSQL("UPDATE message SET body_checked = 0")
+        }
     }
 
     /**
@@ -775,6 +782,6 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
 
     private companion object {
         const val NAME = "mydidstation.db"
-        const val VERSION = 9
+        const val VERSION = 10
     }
 }

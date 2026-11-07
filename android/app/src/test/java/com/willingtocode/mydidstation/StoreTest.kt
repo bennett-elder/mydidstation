@@ -172,6 +172,26 @@ class StoreTest {
     }
 
     @Test
+    fun `an unverified incoming message is offered once and then not again`() {
+        val store = store()
+        store.putDid("5551234567")
+        store.upsertRemote(
+            did = "5551234567",
+            contact = "5551110002",
+            remoteId = 900001L,
+            incoming = true,
+            body = "hello",
+            media = emptyList(),
+            sentAt = 1_700_000_000L,
+            unread = true,
+            carrierStatus = "",
+        )
+        assertEquals(listOf(900001L), store.uncheckedIncoming("5551234567", 8))
+        store.markBodyChecked("5551234567", 900001L)
+        assertTrue(store.uncheckedIncoming("5551234567", 8).isEmpty())
+    }
+
+    @Test
     fun `a mailbox coverage marker survives a rewrite`() {
         val store = store()
         // Never filled and empty are different answers, and zero is the first.
