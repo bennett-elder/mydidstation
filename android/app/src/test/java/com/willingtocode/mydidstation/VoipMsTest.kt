@@ -194,4 +194,82 @@ class VoipMsTest {
         assertTrue(failure is IllegalStateException)
         assertEquals(null, server.takeRequest(1, java.util.concurrent.TimeUnit.MILLISECONDS))
     }
+
+    @Test
+    fun `mailboxes carry their counts and the transcription flag`() = runBlocking {
+        reply(
+            """{"status":"success","voicemails":[
+                 {"mailbox":"1001","name":"Main","new":"3","urgent":"2",
+                  "transcription":"yes","password":"1234"},
+                 {"mailbox":"1002","name":"Side","new":"0","urgent":"0",
+                  "transcription":"no"}]}"""
+        )
+        val boxes = api().mailboxes()
+        assertEquals(2, boxes.size)
+        assertEquals("Main", boxes[0].name)
+        assertEquals(3, boxes[0].newCount)
+        assertEquals(2, boxes[0].urgent)
+        assertTrue(boxes[0].transcription)
+        assertFalse(boxes[1].transcription)
+    }
+
+    @Test
+    fun `no mailboxes is empty rather than an error`() = runBlocking {
+        reply("""{"status":"no_mailbox"}""")
+        assertTrue(api().mailboxes().isEmpty())
+    }
+
+    @Test
+    fun `an empty folder is empty rather than an error`() = runBlocking {
+        reply("""{"status":"no_voicemail"}""")
+        assertTrue(api().voicemails("1001", "INBOX").isEmpty())
+    }
+
+    @Test
+    fun `voicemail rows parse folder, caller, duration and flags`() = runBlocking {
+        reply(
+            """{"status":"success","messages":[
+                 {"mailbox":"1001","folder":"INBOX","message_num":"7",
+                  "date":"2026-11-06","callerid":"15551110002","duration":"00:00:06",
+                  "urgent":"yes","listened":"no"}]}"""
+        )
+        val row = api().voicemails("1001").single()
+        assertEquals(7, row.messageNum)
+        assertEquals("INBOX", row.folder)
+        assertEquals("2026-11-06", row.date)
+        assertEquals("5551110002", row.callerId)
+        assertEquals("00:00:06", row.duration)
+        assertTrue(row.urgent)
+        assertFalse(row.listened)
+    }
+
+    @Test
+    fun `a recording is decoded from the base64 it arrives in`() = runBlocking {
+        val audio = byteArrayOf(0x49, 0x44, 0x33, 0x04, 0x00)
+        val encoded = android.util.Base64.encodeToString(audio, android.util.Base64.NO_WRAP)
+        reply(
+            """{"status":"success","message":[
+                 {"mailbox":"1001","folder":"INBOX","message_num":7,"data":"$encoded"}]}"""
+        )
+        val decoded = api().voicemailAudio("1001", "INBOX", 7)
+        assertTrue("audio did not round-trip", audio.contentEquals(decoded))
+    }
+
+    @Test
+    fun `an absurd audio payload is refused before it is decoded`() {
+        val api = api()
+        assertTrue(api.audioLengthAllowed(1024))
+        assertFalse(api.audioLengthAllowed(Int.MAX_VALUE))
+    }
+
+    @Test
+    fun `marking listened sends the documented parameters`() = runBlocking {
+        reply("""{"status":"success"}""")
+        api().markVoicemailListened("1001", "INBOX", 7, listened = true)
+        val body = server.takeRequest().body.readUtf8()
+        assertTrue("method missing from $body", body.contains("markListenedVoicemailMessage"))
+        assertTrue("mailbox missing from $body", body.contains("1001"))
+        assertTrue("folder missing from $body", body.contains("INBOX"))
+        assertTrue("listen flag missing from $body", body.contains("yes"))
+    }
 }

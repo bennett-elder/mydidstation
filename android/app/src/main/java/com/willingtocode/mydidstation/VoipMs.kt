@@ -5,6 +5,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import android.util.Base64
 import org.json.JSONObject
 import java.io.IOException
 import java.text.SimpleDateFormat
@@ -26,6 +27,32 @@ data class RemoteMsg(
     val media: List<String>,
     val sentAt: Long,
     val carrierStatus: String,
+)
+
+/**
+ * One mailbox, as getVoicemails reports it.
+ *
+ * There is deliberately no password field: the payload carries one, and this does not
+ * read it, keep it or log it.
+ */
+data class MailboxInfo(
+    val mailbox: String,
+    val name: String,
+    val newCount: Int,
+    val urgent: Int,
+    val transcription: Boolean,
+)
+
+/** One recording in one folder. The API's `date` carries no time of day. */
+data class VoiceMailInfo(
+    val mailbox: String,
+    val folder: String,
+    val messageNum: Int,
+    val date: String,
+    val callerId: String,
+    val duration: String,
+    val urgent: Boolean,
+    val listened: Boolean,
 )
 
 /**
@@ -147,6 +174,125 @@ class VoipMs(private val settings: ApiSettings) {
         return json.optString("sms").toLongOrNull()
     }
 
+    /**
+     * Every mailbox on the account.
+     *
+     * The only call that enumerates mailboxes, and a mailbox exists independently of any
+     * DID: a number's `voicemail` field points at one, several numbers can point at the
+     * same one, and a box can have no number at all. So this is where the voicemail list
+     * starts, never `getDIDsInfo`.
+     */
+    suspend fun mailboxes(): List<MailboxInfo> {
+        val json = call("method" to "getVoicemails")
+        if (json.optString("status") != "success") {
+            if (isEmptyStatus(json)) return emptyList()
+            throw ApiException(json.optString("status"))
+        }
+        val array = json.optJSONArray("voicemails") ?: return emptyList()
+        val out = mutableListOf<MailboxInfo>()
+        for (i in 0 until array.length()) {
+            val row = array.optJSONObject(i) ?: continue
+            val mailbox = row.optString("mailbox")
+            if (mailbox.isEmpty()) continue
+            out.add(
+                MailboxInfo(
+                    mailbox = mailbox,
+                    name = row.optString("name"),
+                    newCount = row.optString("new").toIntOrNull() ?: 0,
+                    urgent = row.optString("urgent").toIntOrNull() ?: 0,
+                    transcription = row.optString("transcription").equals("yes", true),
+                )
+            )
+        }
+        return out
+    }
+
+    /** The recordings in one folder, or in every folder when none is named. */
+    suspend fun voicemails(mailbox: String, folder: String? = null): List<VoiceMailInfo> {
+        val params = mutableListOf("method" to "getVoicemailMessages", "mailbox" to mailbox)
+        if (folder != null) params += "folder" to folder
+        val json = call(*params.toTypedArray())
+        if (json.optString("status") != "success") {
+            if (isEmptyStatus(json)) return emptyList()
+            throw ApiException(json.optString("status"))
+        }
+        val array = json.optJSONArray("messages") ?: return emptyList()
+        val out = mutableListOf<VoiceMailInfo>()
+        for (i in 0 until array.length()) {
+            val row = array.optJSONObject(i) ?: continue
+            val number = row.optString("message_num").toIntOrNull() ?: continue
+            out.add(
+                VoiceMailInfo(
+                    mailbox = row.optString("mailbox", mailbox),
+                    folder = row.optString("folder"),
+                    messageNum = number,
+                    date = row.optString("date"),
+                    callerId = normalizePhone(row.optString("callerid")),
+                    duration = row.optString("duration"),
+                    urgent = row.optString("urgent").equals("yes", true),
+                    listened = row.optString("listened").equals("yes", true),
+                )
+            )
+        }
+        return out
+    }
+
+    /**
+     * One recording, decoded from the base64 the API wraps it in.
+     *
+     * mp3, because that is the API's own default. The bytes are attacker-controlled, so
+     * the encoded length is checked before anything is allocated for the decode, and the
+     * decoded length is checked after, rather than trusting either the response or the
+     * format that was asked for.
+     */
+    suspend fun voicemailAudio(mailbox: String, folder: String, messageNum: Int): ByteArray {
+        val json = call(
+            "method" to "getVoicemailMessageFile",
+            "mailbox" to mailbox,
+            "folder" to folder,
+            "message_num" to messageNum.toString(),
+        )
+        requireSuccess(json)
+        val row = json.optJSONArray("message")?.optJSONObject(0)
+            ?: throw ApiException("no_message")
+        val data = row.optString("data")
+        if (!audioLengthAllowed(data.length)) throw ApiException("audio_too_large")
+        val bytes = Base64.decode(data, Base64.DEFAULT)
+        if (bytes.size > MAX_AUDIO_BYTES) throw ApiException("audio_too_large")
+        return bytes
+    }
+
+    /**
+     * Marks a recording listened or unlistened.
+     *
+     * The first server mutation the app makes outside sending a text, and the API moves
+     * the message between INBOX and Old as a side effect, so a caller cannot keep using
+     * (folder, message number) as an identity afterwards.
+     */
+    suspend fun markVoicemailListened(
+        mailbox: String,
+        folder: String,
+        messageNum: Int,
+        listened: Boolean,
+    ) {
+        val json = call(
+            "method" to "markListenedVoicemailMessage",
+            "mailbox" to mailbox,
+            "folder" to folder,
+            "message_num" to messageNum.toString(),
+            "listened" to if (listened) "yes" else "no",
+        )
+        requireSuccess(json)
+    }
+
+    /** A `no_...` status means there is simply nothing there, which is not a failure. */
+    private fun isEmptyStatus(json: JSONObject): Boolean =
+        json.optString("status").startsWith("no_")
+
+    /** Whether a base64 payload is small enough to decode at all. */
+    internal fun audioLengthAllowed(encodedChars: Int): Boolean =
+        encodedChars <= MAX_AUDIO_BASE64_CHARS
+
     companion object {
         /**
          * The API is asked for `timezone=-5`, a fixed offset, so every response is
@@ -155,6 +301,12 @@ class VoipMs(private val settings: ApiSettings) {
          * daylight saving, which quietly moved an hour of every summer timestamp.
          */
         private val API_TZ: TimeZone = TimeZone.getTimeZone("GMT-5")
+
+        /** One recording's ceiling. A ten minute mp3 at 24 kbps is about 1.8 MB. */
+        private const val MAX_AUDIO_BYTES = 8 * 1024 * 1024
+
+        /** Encoded is about a third larger, so the pre-decode check has to be wider. */
+        private const val MAX_AUDIO_BASE64_CHARS = 12 * 1024 * 1024
 
         fun normalizePhone(raw: String): String {
             val digits = raw.filter { it.isDigit() }
