@@ -88,6 +88,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -101,6 +107,14 @@ import java.util.TimeZone
 
 /** A pending row older than this is assumed to have never been sent. */
 private const val STALE_PENDING_SECONDS = 15L * 60
+
+/**
+ * How far a pull at the end of a thread has to travel before it counts as a refresh.
+ *
+ * Roughly two finger-widths: far enough not to fire while flicking to the bottom, close
+ * enough that it feels like a gesture rather than a hold.
+ */
+private const val PULL_UP_TO_REFRESH = 96
 
 /** "12:34" style countdown to the next background poll. */
 private fun countdownText(nextAt: Long?, now: Long): String? {
@@ -1150,6 +1164,23 @@ fun MessagesScreen(
         if (resolvedContact.isNotEmpty()) container.notifier.cancel(did, resolvedContact)
     }
 
+    // One refresh action, used by the pull at the top and by the pull up at the end. Two
+    // copies of this would drift apart the first time either grew a status message.
+    val refreshNow: () -> Unit = {
+        if (!refreshing) {
+            scope.launch {
+                refreshing = true
+                try {
+                    container.sync.refreshDid(did)
+                } catch (e: Exception) {
+                    error = e.message
+                }
+                reload()
+                refreshing = false
+            }
+        }
+    }
+
     // While this thread is on screen its own arrivals stay quiet, so reading is
     // not interrupted by a notification for the thing already in front of you.
     DisposableEffect(did, resolvedContact) {
@@ -1264,22 +1295,46 @@ fun MessagesScreen(
 
             PullToRefreshBox(
                 isRefreshing = refreshing,
-                onRefresh = {
-                    scope.launch {
-                        refreshing = true
-                        try {
-                            container.sync.refreshDid(did)
-                        } catch (e: Exception) {
-                            error = e.message
-                        }
-                        reload()
-                        refreshing = false
-                    }
-                },
+                onRefresh = refreshNow,
                 modifier = Modifier.weight(1f).fillMaxWidth(),
             ) {
+                // Pull up at the end of a long thread to refresh as well. Reaching the top of
+                // a conversation hundreds of messages deep just to drag it down again is a
+                // long way to travel for one request, so the same action is offered where the
+                // eye already is. The gesture only starts once the list is at its end, which
+                // is what keeps it from firing during ordinary scrolling.
+                val pullUpThreshold = with(LocalDensity.current) { PULL_UP_TO_REFRESH.dp.toPx() }
+                val pullUp = remember(listState) {
+                    var pulled = 0f
+                    object : NestedScrollConnection {
+                        override fun onPostScroll(
+                            consumed: Offset,
+                            available: Offset,
+                            source: NestedScrollSource,
+                        ): Offset {
+                            if (listState.canScrollForward || available.y >= 0f) {
+                                pulled = 0f
+                                return Offset.Zero
+                            }
+                            pulled += -available.y
+                            if (pulled >= pullUpThreshold) {
+                                pulled = 0f
+                                refreshNow()
+                            }
+                            return Offset.Zero
+                        }
+
+                        override suspend fun onPreFling(available: Velocity): Velocity {
+                            pulled = 0f
+                            return Velocity.Zero
+                        }
+                    }
+                }
                 LazyColumn(
-                    Modifier.fillMaxSize().padding(horizontal = 12.dp),
+                    Modifier
+                        .fillMaxSize()
+                        .nestedScroll(pullUp)
+                        .padding(horizontal = 12.dp),
                     state = listState,
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
