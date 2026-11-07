@@ -158,7 +158,7 @@ def add_message(did, contact, text, incoming, carrier_status="Information not av
         return message
 
 
-def tiny_png(width=48, height=48, rgb=(70, 130, 190)):
+def tiny_png(width=320, height=240, rgb=(70, 130, 190)):
     """A solid PNG, built here so the mock needs no image library.
 
     Real bytes with a real signature, because the point of the fixture is that the app has
