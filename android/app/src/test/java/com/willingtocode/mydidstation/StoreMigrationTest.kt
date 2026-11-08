@@ -80,6 +80,60 @@ class StoreMigrationTest {
     }
 
     @Test
+    fun `a short code keeps its digits and its history`() {
+        V1Database(context).use { legacy ->
+            val db = legacy.writableDatabase
+            db.execSQL(
+                "INSERT INTO did (did, enabled, window_end, last_remote_id) " +
+                    "VALUES ('5551234567', 1, 1700000000, 9002)"
+            )
+            // The same sender twice: the API's prefixed spelling holding the incoming
+            // message, and the real one holding a reply that was typed by hand.
+            db.execSQL(
+                "INSERT INTO conversation (id, did, contact) VALUES (1, '5551234567', '189866')"
+            )
+            db.execSQL(
+                "INSERT INTO conversation (id, did, contact) VALUES (2, '5551234567', '89866')"
+            )
+            // Begins with 1 but is not in an allocated range, so it is not a NANP short
+            // code and stripping it would invent a different destination.
+            db.execSQL(
+                "INSERT INTO conversation (id, did, contact) VALUES (3, '5551234567', '112345')"
+            )
+            db.execSQL(
+                "INSERT INTO message (conversation_id, did, remote_id, contact, incoming, " +
+                    "body, sent_at, unread) VALUES (1, '5551234567', 9001, '189866', 1, " +
+                    "'buy something', 1700000000, 1)"
+            )
+            db.execSQL(
+                "INSERT INTO message (conversation_id, did, remote_id, contact, incoming, " +
+                    "body, sent_at, unread) VALUES (2, '5551234567', 9002, '89866', 0, " +
+                    "'stop', 1700000001, 0)"
+            )
+        }
+
+        val store = Store(context)
+        val merged = store.conversationId("5551234567", "89866")
+        assertTrue("the stripped contact is the surviving conversation", merged != 0L)
+        assertEquals(
+            "nothing is left under the prefixed spelling",
+            0L,
+            store.conversationId("5551234567", "189866"),
+        )
+        assertEquals(
+            "both conversations, and only the ones that were not ours to touch",
+            listOf("112345", "89866"),
+            store.conversations("5551234567").map { it.contact }.sorted(),
+        )
+        val rows = store.messages(merged)
+        assertEquals("neither message was lost in the merge", 2, rows.size)
+        assertEquals(
+            listOf("buy something", "stop"),
+            rows.sortedBy { it.sentAt }.map { it.body },
+        )
+    }
+
+    @Test
     fun `a version 7 database keeps its recordings through the rebuild`() {
         // v8 changes the primary key, which SQLite cannot alter, so the table is rebuilt and
         // the rows copied. A copy that loses a row or a column would be silent otherwise.

@@ -248,6 +248,91 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
             // later pass would look at it again. One re-check each repairs the damage.
             db.execSQL("UPDATE message SET body_checked = 0")
         }
+        if (oldVersion < 11) {
+            // v11 removes the country code the API puts in front of a short code contact,
+            // and repairs the conversations already keyed with it.
+            rekeyShortCodes(db)
+        }
+    }
+
+    /** One conversation whose contact still carries the country code. */
+    private data class StaleContact(
+        val id: Long,
+        val did: String,
+        val from: String,
+        val to: String,
+    )
+
+    /**
+     * v11: a short code has no country code in front of it.
+     *
+     * The API reports a five or six digit sender as a NANP number, so the code `89866`
+     * arrived as `189866`, and was stored, shown, and replied to as a destination that does
+     * not exist. The carrier answered `malformed-invalid-to-number`.
+     *
+     * Two shapes need repairing. A conversation keyed `189866` with nothing beside it is
+     * renamed. A conversation keyed `189866` that also has a `89866` neighbour is merged
+     * into the neighbour, because the user has replied to both spellings at different times
+     * and the history belongs in one place.
+     */
+    /**
+     * The v11 rule, frozen at the version that needed it.
+     *
+     * Deliberately not a call into `VoipMs.normalizePhone`. A migration is a statement about
+     * how data looked at one version, so it has to keep behaving the same way forever. If the
+     * live rule later learns something new, a user upgrading from v10 to a much later version
+     * would get different repairs than a user who upgraded at v11, from identical data, and no
+     * test would ever catch it because tests run the chain once.
+     *
+     * Never edit this, and never call it from anything but the v11 step.
+     */
+    private fun stripCountryCodeV11(digits: String): String {
+        if (!digits.startsWith("1")) return digits
+        val rest = digits.drop(1)
+        return when {
+            rest.length == 10 -> rest
+            rest.length in 5..6 && rest.first() in '2'..'9' -> rest
+            else -> digits
+        }
+    }
+
+    private fun rekeyShortCodes(db: SQLiteDatabase) {
+        val stale = mutableListOf<StaleContact>()
+        db.rawQuery("SELECT id, did, contact FROM conversation WHERE contact LIKE '1%'", null)
+            .use { c ->
+                while (c.moveToNext()) {
+                    val contact = c.getString(2)
+                    val fixed = stripCountryCodeV11(contact)
+                    if (fixed != contact) {
+                        stale.add(StaleContact(c.getLong(0), c.getString(1), contact, fixed))
+                    }
+                }
+            }
+        for (row in stale) {
+            val existing = db.rawQuery(
+                "SELECT id FROM conversation WHERE did = ? AND contact = ?",
+                arrayOf(row.did, row.to),
+            ).use { if (it.moveToFirst()) it.getLong(0) else null }
+            if (existing == null) {
+                db.execSQL(
+                    "UPDATE conversation SET contact = ? WHERE id = ?",
+                    arrayOf<Any>(row.to, row.id),
+                )
+            } else {
+                // Messages move before the old conversation goes: the foreign key from
+                // message to conversation cascades on delete, so deleting first would take
+                // the history with it.
+                db.execSQL(
+                    "UPDATE message SET conversation_id = ? WHERE conversation_id = ?",
+                    arrayOf<Any>(existing, row.id),
+                )
+                db.execSQL("DELETE FROM conversation WHERE id = ?", arrayOf<Any>(row.id))
+            }
+            db.execSQL(
+                "UPDATE message SET contact = ? WHERE did = ? AND contact = ?",
+                arrayOf<Any>(row.to, row.did, row.from),
+            )
+        }
     }
 
     /**
@@ -782,6 +867,6 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
 
     private companion object {
         const val NAME = "mydidstation.db"
-        const val VERSION = 10
+        const val VERSION = 11
     }
 }

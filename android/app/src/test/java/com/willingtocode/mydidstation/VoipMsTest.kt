@@ -340,6 +340,40 @@ class VoipMsTest {
     }
 
     @Test
+    fun `a short code loses the country code the API added`() {
+        // What the API actually sends for a five digit sender. Replying to the unstripped
+        // form is answered with malformed-invalid-to-number, because it is not a number.
+        assertEquals("89866", VoipMs.normalizePhone("189866"))
+        assertEquals("898661", VoipMs.normalizePhone("1898661"))
+    }
+
+    @Test
+    fun `a number loses its country code as it always did`() {
+        assertEquals("8885551234", VoipMs.normalizePhone("18885551234"))
+        assertEquals("5551234567", VoipMs.normalizePhone("(555) 123-4567"))
+    }
+
+    @Test
+    fun `a short code with no prefix is left alone`() {
+        assertEquals("89866", VoipMs.normalizePhone("89866"))
+    }
+
+    @Test
+    fun `a short code that starts with one keeps its digits`() {
+        // Somewhere other than NANP, a five digit code may begin with 1. The allocated
+        // ranges say US and Canadian codes never do, so a remainder that starts with 1 is
+        // not one, and stripping it would invent a different destination.
+        assertEquals("112345", VoipMs.normalizePhone("112345"))
+    }
+
+    @Test
+    fun `a value that is neither a number nor a short code is untouched`() {
+        assertEquals("", VoipMs.normalizePhone(""))
+        assertEquals("123", VoipMs.normalizePhone("123"))
+        assertEquals("15551234", VoipMs.normalizePhone("15551234"))
+    }
+
+    @Test
     fun `a five character payload shows what it says`() = runBlocking {
         // The count alone was not enough to tell a sentinel from a broken body: five
         // characters, none of them outside the alphabet, is what the phones reported for
