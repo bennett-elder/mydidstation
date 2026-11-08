@@ -231,28 +231,47 @@ sealed interface VmScreen {
 }
 
 /** A conversation a notification wants opened, as read from the intent. */
-data class Target(val did: String, val contact: String)
+/** Where a notification tap asked the app to open. A mailbox tap fills [mailbox], not [did]. */
+data class Target(val did: String, val contact: String, val mailbox: String = "")
 
 @Composable
 fun Root(container: Container, open: Target? = null, onConsumed: () -> Unit = {}) {
-    var tab by remember { mutableStateOf(Tab.Texts) }
+    // A tap on a voicemail notification lands on the mailbox, so the tab and its stack are
+    // chosen as initial values rather than corrected after the first frame.
+    var tab by remember {
+        mutableStateOf(if (open?.mailbox?.isNotEmpty() == true) Tab.Voicemail else Tab.Texts)
+    }
     // The Voicemail tab's own stack, so Back inside it returns to the mailbox list
     // instead of leaving the tab.
-    var vm by remember { mutableStateOf<VmScreen>(VmScreen.Mailboxes) }
+    var vm by remember {
+        mutableStateOf<VmScreen>(
+            open?.mailbox?.takeIf { it.isNotEmpty() }
+                ?.let { VmScreen.Messages(it, "") }
+                ?: VmScreen.Mailboxes,
+        )
+    }
     // A notification tap starts at the thread it is about, rather than flashing the
     // numbers list on the way.
     var screen by remember {
         mutableStateOf<Screen>(
-            open?.let { Screen.Msgs(it.did, 0L, it.contact) } ?: Screen.Dids,
+            if (open != null && open.mailbox.isEmpty()) {
+                Screen.Msgs(open.did, 0L, open.contact)
+            } else {
+                Screen.Dids
+            },
         )
     }
-
     // The thread lives in the Texts stack, so the tab has to be selected as well or it
     // would open behind whichever tab was showing.
     LaunchedEffect(open) {
         if (open != null) {
-            tab = Tab.Texts
-            screen = Screen.Msgs(open.did, 0L, open.contact)
+            if (open.mailbox.isNotEmpty()) {
+                tab = Tab.Voicemail
+                vm = VmScreen.Messages(open.mailbox, "")
+            } else {
+                tab = Tab.Texts
+                screen = Screen.Msgs(open.did, 0L, open.contact)
+            }
             onConsumed()
         }
     }
@@ -623,6 +642,14 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
             }
             busy = false
         }
+    }
+
+    // Looking at a mailbox is reading it: the notification has nothing left to say, and a
+    // poll that raises the count while it is on screen must not buzz about it.
+    DisposableEffect(mailbox) {
+        VisibleMailbox.key = mailbox
+        container.notifier.cancel(mailbox)
+        onDispose { if (VisibleMailbox.key == mailbox) VisibleMailbox.key = null }
     }
 
     LaunchedEffect(mailbox) {

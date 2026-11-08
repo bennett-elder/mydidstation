@@ -34,6 +34,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun targetFrom(intent: Intent?): Target? {
+        // A voicemail notification carries a mailbox and nothing else, and the voicemail
+        // tab is its own stack, so it is a separate shape rather than a did with no contact.
+        val mailbox = intent?.getStringExtra(EXTRA_MAILBOX)?.takeIf { it.isNotBlank() }
+        if (mailbox != null) return Target("", "", mailbox)
         val did = intent?.getStringExtra(EXTRA_DID)?.takeIf { it.isNotBlank() } ?: return null
         val contact = intent.getStringExtra(EXTRA_CONTACT)?.takeIf { it.isNotBlank() } ?: return null
         return Target(did, contact)
@@ -42,5 +46,6 @@ class MainActivity : ComponentActivity() {
     companion object {
         const val EXTRA_DID = "did"
         const val EXTRA_CONTACT = "contact"
+        const val EXTRA_MAILBOX = "mailbox"
     }
 }

@@ -8,7 +8,8 @@ run more than one number.
 > fetched with a size cap, identified from their bytes, cached, and shown whole
 > with a tap to open them larger. Voicemail has its own tab: mailboxes, transcripts
 > where your account has them, playback with seeking, and listened state written
-> back to the account. Sending media is not built.
+> back to the account. New recordings notify like new texts do. Sending media is
+> not built.
 
 Not affiliated with or endorsed by VoIP.ms. This is a third-party client that
 talks to their public API using credentials you supply.
@@ -57,6 +58,12 @@ days per tap down to a two-year floor.
   The window starts at 30 days, older recordings load on request, and messages
   reconcile by mailbox, folder, and message number rather than by position, so one
   that arrives late or is deleted elsewhere does not shift the rest.
+- **Voicemail notifications.** Voicemail polls in the same pass as texts, on the same
+  cadence. A mailbox whose new count rises gets one notification, replaced as the
+  count grows, saying how many are waiting. It is on its own channel, so it can be
+  silenced without silencing texts, and it never fires for the mailbox you are
+  looking at. The count comes from the mailbox list, one request for the whole
+  account, so a background poll never downloads a recording.
 
 ## What it does not do yet
 
@@ -70,8 +77,6 @@ Said plainly, because you will hit these:
 - **Numbers, not names.** There is no contact lookup or avatar.
 - **No push.** Latency is bounded by the poll interval, which is between 15 and 60
   minutes in the background.
-- **No voicemail notifications.** A new recording appears when you open the tab.
-  Nothing announces it, so the tab is worth a glance rather than a check.
 
 `notes/BACKLOG.md` in a working copy ranks these by value per hour, with the
 implementation notes for each.

@@ -186,12 +186,14 @@ class Sync(
      * Messages are not fetched here. Opening a mailbox does that, the same way opening a
      * number is what fetches its texts (D8).
      */
-    suspend fun refreshMailboxes(): Int = withContext(Dispatchers.IO) {
+    suspend fun refreshMailboxes(discover: Boolean = true): Int = withContext(Dispatchers.IO) {
         // The number-to-mailbox mapping comes from getDIDsInfo, which discovery already
         // reads, and nothing else refreshes it. Doing that here is what keeps a mailbox's
         // "N numbers" honest without making the user go through Settings after the account
         // is reconfigured, and it costs one request.
-        discoverDids()
+        if (discover) discoverDids()
+        // Read before writing, because the comparison is the whole notification rule.
+        val was = store.mailboxes().associate { it.mailbox to it.newCount }
         val found = api.mailboxes()
         found.forEach {
             store.putMailbox(
@@ -202,6 +204,7 @@ class Sync(
                 transcription = it.transcription,
             )
         }
+        risers(was, found).forEach { notifier.newVoicemail(it.mailbox, it.name, it.newCount) }
         found.size
     }
 
@@ -378,8 +381,28 @@ class Sync(
                 // so the next poll retries it.
             }
         }
+        // Voicemail polls on the same cadence and in the same pass as texts. The count
+        // comes from the mailbox list, which is one request for the whole account, so this
+        // does not fetch recordings or even a message list in the background.
+        try {
+            refreshMailboxes()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Same reasoning as above: a failed voicemail poll must not cost the text poll.
+        }
         added
     }
+
+    /**
+     * The mailboxes whose new count went up since the last poll.
+     *
+     * A count that fell is somebody reading their voicemail, which is not news. An
+     * unchanged count is not news either. Only a rise is, and comparing against what was
+     * stored is what keeps a recording from buzzing on every poll forever.
+     */
+    internal fun risers(before: Map<String, Int>, after: List<MailboxInfo>): List<MailboxInfo> =
+        after.filter { (before[it.mailbox] ?: 0) < it.newCount }
 
     /**
      * Delivers a message the UI has already shown as pending. The API returns the

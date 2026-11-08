@@ -48,6 +48,23 @@ class SyncBackfillTest {
             """"carrier_status":"Information not available"}]}"""
     )
 
+    /** The rule that decides whether a voicemail notification is posted at all. */
+    @Test
+    fun `only a rising voicemail count is news`() {
+        val api = VoipMs(FakeSettings(server.url("/rest.php").toString()))
+        val sync = Sync(store(), api, Notifier { _, _, _, _ -> })
+        fun box(count: Int) = MailboxInfo("100", "Home", count, 0, false)
+
+        // First ever poll finds two waiting, which is worth saying once.
+        assertEquals(listOf(2), sync.risers(emptyMap(), listOf(box(2))).map { it.newCount })
+        // The same two, still unread, are not news a second time.
+        assertTrue(sync.risers(mapOf("100" to 2), listOf(box(2))).isEmpty())
+        // A third one is.
+        assertEquals(listOf(3), sync.risers(mapOf("100" to 2), listOf(box(3))).map { it.newCount })
+        // Somebody read their voicemail elsewhere, so the count fell: not news.
+        assertTrue(sync.risers(mapOf("100" to 3), listOf(box(0))).isEmpty())
+    }
+
     @Before
     fun start() {
         server = MockWebServer()
