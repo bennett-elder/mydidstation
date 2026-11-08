@@ -1,12 +1,14 @@
 # My DID Station
 
-SMS and picture MMS for [VoIP.ms](https://voip.ms), built for people who run more
-than one number.
+SMS, picture MMS, and voicemail for [VoIP.ms](https://voip.ms), built for people who
+run more than one number.
 
 > Working, and used daily on a real phone. Sending, threaded history, delivery
-> status, notifications, configurable polling and MMS photos all work. Photos are
+> status, notifications, configurable polling, and MMS photos all work. Photos are
 > fetched with a size cap, identified from their bytes, cached, and shown whole
-> with a tap to open them larger. Sending media is not built.
+> with a tap to open them larger. Voicemail has its own tab: mailboxes, transcripts
+> where your account has them, playback with seeking, and listened state written
+> back to the account. Sending media is not built.
 
 Not affiliated with or endorsed by VoIP.ms. This is a third-party client that
 talks to their public API using credentials you supply.
@@ -38,29 +40,38 @@ days per tap down to a two-year floor.
   are reading never notifies, and opening a thread clears its notification.
 - **A status strip** on both lists, showing how long the last refresh took and how
   long until the next background run.
-- **Cadence you choose.** 30 s, 60 s, 2 minutes or off while a number is open, and
-  15, 30 or 60 minutes in the background.
+- **Cadence you choose.** 30 s, 60 s, 2 minutes, or off while a number is open, and
+  15, 30, or 60 minutes in the background.
 - **MMS photos.** A picture arrives, is downloaded over a capped stream, identified
   from its first bytes rather than its URL, cached under a hash of the link, and
   drawn at its own aspect ratio so nothing is cropped. Tap it to open it larger,
   with a Close button and the back gesture both working. Attachments that are not
   pictures are handed to another app instead: audio plays inline when the server
-  has the bytes, and video, OGG, MIDI and PDF open externally.
+  has the bytes, and video, OGG, MIDI, and PDF open externally.
 - **Credentials** in Keystore-backed encrypted preferences. The database is local
   SQLite and is never synced anywhere.
+- **Voicemail**, in a second tab. Every mailbox on the account is listed with its
+  count of new messages, and each recording shows its transcript when the account
+  has transcription enabled. Audio plays inline with 5 second seeking, is cached so
+  a replay costs nothing, and playing it marks the message listened through the API.
+  The window starts at 30 days, older recordings load on request, and messages
+  reconcile by mailbox, folder, and message number rather than by position, so one
+  that arrives late or is deleted elsewhere does not shift the rest.
 
 ## What it does not do yet
 
 Said plainly, because you will hit these:
 
 - **Attachments other than pictures are unreliable.** A photo renders. Audio plays
-  inline, and video, OGG, MIDI and PDF open in another app, but only when the media
+  inline, and video, OGG, MIDI, and PDF open in another app, but only when the media
   link actually returns bytes. One real voice note arrived with an empty body behind
   its link, which shows as an empty attachment rather than playing; that is the
   server having nothing to serve, not a rendering fault. Sending media is not built.
 - **Numbers, not names.** There is no contact lookup or avatar.
 - **No push.** Latency is bounded by the poll interval, which is between 15 and 60
   minutes in the background.
+- **No voicemail notifications.** A new recording appears when you open the tab.
+  Nothing announces it, so the tab is worth a glance rather than a check.
 
 `notes/BACKLOG.md` in a working copy ranks these by value per hour, with the
 implementation notes for each.
@@ -73,7 +84,7 @@ implementation notes for each.
 | `tools/mock_voipms.py` | A stand-in REST endpoint, for testing without touching real messages |
 | `relay/` | Optional push relay, four implementations of one contract. Not wired to the app |
 | `bench/` | Cost and latency bench for those implementations |
-| `deploy/` | Cloud-init, Caddy and quadlet for self-hosting the relay. Not written yet |
+| `deploy/` | Cloud-init, Caddy, and quadlet for self-hosting the relay. Not written yet |
 
 ## Build and test
 
@@ -92,9 +103,9 @@ request and response shapes, and the store. `notes/STATUS.md` lists the gaps.
 
 ### Testing without the real API
 
-`tools/mock_voipms.py` answers `getDIDsInfo`, `getMMS`, `getSMS` and `sendSMS`
+`tools/mock_voipms.py` answers `getDIDsInfo`, `getMMS`, `getSMS`, and `sendSMS`
 with the shapes the real API uses, logs every call with a timestamp, and can be
-told to fail, delay or accept an injected inbound message. Point the app at it by
+told to fail, delay, or accept an injected inbound message. Point the app at it by
 long-pressing the "Sync" heading in Settings and entering
 `http://10.0.2.2:8765/rest.php` on an emulator. Clear the field to go back to
 VoIP.ms. The app bar reads "not the real API" while an override is active.
