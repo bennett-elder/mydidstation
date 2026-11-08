@@ -316,6 +316,30 @@ class VoipMsTest {
     }
 
     @Test
+    fun `a shortcode can be replied to`() {
+        // The reply that stops marketing traffic. Seven digits used to be the floor, so the
+        // compose field refused every shortcode and the app could not send STOP.
+        assertTrue(VoipMs.isSendable("22395"))
+        assertTrue(VoipMs.isSendable("32665"))
+    }
+
+    @Test
+    fun `a normal number in any shape is sendable`() {
+        assertTrue(VoipMs.isSendable("5551234567"))
+        assertTrue(VoipMs.isSendable("(555) 123-4567"))
+        assertTrue(VoipMs.isSendable("+1 555 123 4567"))
+        assertTrue(VoipMs.isSendable("+44 20 7946 0958"))
+    }
+
+    @Test
+    fun `an empty or nonsense destination is not sendable`() {
+        assertFalse(VoipMs.isSendable(""))
+        assertFalse(VoipMs.isSendable("   "))
+        assertFalse(VoipMs.isSendable("123"))
+        assertFalse(VoipMs.isSendable("1234567890123456"))
+    }
+
+    @Test
     fun `a five character payload shows what it says`() = runBlocking {
         // The count alone was not enough to tell a sentinel from a broken body: five
         // characters, none of them outside the alphabet, is what the phones reported for

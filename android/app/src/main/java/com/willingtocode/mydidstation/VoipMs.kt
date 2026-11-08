@@ -478,6 +478,12 @@ class VoipMs(private val settings: ApiSettings) {
         /** Encoded is about a third larger, so the pre-decode check has to be wider. */
         private const val MAX_AUDIO_BASE64_CHARS = 12 * 1024 * 1024
 
+        /** The shortest shortcode in common use, which is also the shortest reply worth sending. */
+        private const val SHORTCODE_MIN_DIGITS = 5
+
+        /** E.164 caps a subscriber number at fifteen digits, so nothing longer is addressable. */
+        private const val MAX_DESTINATION_DIGITS = 15
+
         /** The standard alphabet plus padding. Anything else is what breaks a decode. */
         private const val BASE64_ALPHABET =
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
@@ -485,6 +491,21 @@ class VoipMs(private val settings: ApiSettings) {
         fun normalizePhone(raw: String): String {
             val digits = raw.filter { it.isDigit() }
             return if (digits.length == 11 && digits.startsWith("1")) digits.drop(1) else digits
+        }
+
+        /**
+         * Whether a destination is worth sending to.
+         *
+         * Seven digits was the old floor here: right for a phone number, wrong for the one
+         * kind of sender people most need to answer. Marketing and alert traffic arrives from
+         * a five or six digit shortcode, and `STOP` is the reply that stops it, so refusing to
+         * compose to a shortcode quietly kept people subscribed. The floor is now a
+         * shortcode's length and the ceiling is E.164's fifteen digits, which together still
+         * refuse an empty field and a pasted wall of numbers.
+         */
+        fun isSendable(raw: String): Boolean {
+            val digits = normalizePhone(raw)
+            return digits.length >= SHORTCODE_MIN_DIGITS && digits.length <= MAX_DESTINATION_DIGITS
         }
     }
 }
