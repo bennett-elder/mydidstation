@@ -13,6 +13,33 @@ tools, and it is plain Markdown for everyone else.
 **Under 72 characters, one line.** No body, no trailers, no `Co-Authored-By`.
 History is read as a changelog.
 
+## Permission
+
+Discussion is not approval. Planning, explaining, answering a question, or agreeing a
+plan down to the last detail changes nothing on disk, in git, or on GitHub.
+
+Act only on an explicit instruction in the current message. These words mean exactly
+this and nothing else:
+
+- **"ship it"** means commit the change under discussion, bump the version with
+  `scripts/version.sh write`, update the version line in `README.md`, and push. It is
+  the whole chain. No other phrase runs it, and it covers nothing that is not part of
+  that chain, such as a release note, a repository description or a topic.
+- **"commit"** means commit, and stop there.
+- **"bump"** means rewrite `android/version.properties` and nothing else.
+- **"push"** means push what is already committed.
+- **"continue"**, **"go on"**, **"carry on"**, or silence mean keep working on what we
+  were already doing. They never mean publish.
+
+A question is a question however rhetorical it reads. A sentence ending in "right?" or
+"should we?" is not an instruction. Neither is my own judgment that a piece of work is
+finished.
+
+Everything that leaves the machine needs its own instruction, named: commit, push,
+release, repository description, topics, settings. If it is not clear that the message
+asked for one of those, say which command you would run and what it would publish, then
+wait. Do not run it to find out.
+
 ## Language and prose
 
 - **American English**, in code, comments and prose: `license` not `licence`,
