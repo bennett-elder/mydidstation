@@ -109,7 +109,7 @@ Every push builds a signed APK and publishes it as a prerelease.
 
 The version lives in `android/version.properties`, which is committed. Nothing
 computes a version during a build, so a commit always produces the same numbers:
-`0.11.72122` / `11072122` at the time of writing, meaning months since December
+`0.11.81718` / `11081718` at the time of writing, meaning months since December
 2025, then day and time. `scripts/version.sh write` rewrites that file from the
 clock and refuses to run under CI, so the file only ever changes when a person
 commits it.
