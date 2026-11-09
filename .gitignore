@@ -11,6 +11,13 @@ android/**/local.properties
 captures/
 .cxx/
 
+# Voice pathfinder: a probe with its own Gradle root beside android/.
+voice-pathfinder/**/build/
+voice-pathfinder/.gradle/
+voice-pathfinder/.kotlin/
+voice-pathfinder/local.properties
+voice-pathfinder/**/local.properties
+
 # Web client (planned, web/)
 node_modules/
 web/node_modules/
