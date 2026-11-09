@@ -1,6 +1,7 @@
 package com.willingtocode.mydidstation
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -71,25 +72,74 @@ class MmsImageTest {
     }
 
     @Test
-    fun `the decode sample leaves the picture at or under the edge asked for`() {
-        // A sample size that is too small sends more pixels than the attempt planned, which is
-        // how a ladder can look right in a test and still produce an oversized file.
+    fun `scaling puts the long edge exactly where the attempt asked`() {
+        // The bug this exists for: sampling lands on a power of two, so a 4032 pixel photo
+        // asked for 1600 was decoded at 1008 and sent that way, 40% of the pixels promised.
+        assertEquals(1600 to 1200, MmsImage.scaledSize(4032, 3024, 1600))
+        assertEquals(1200 to 1600, MmsImage.scaledSize(3024, 4032, 1600))
+        assertEquals(1600 to 900, MmsImage.scaledSize(4000, 2250, 1600))
+    }
+
+    @Test
+    fun `a picture already inside the edge is never scaled up`() {
+        assertEquals(800 to 600, MmsImage.scaledSize(800, 600, 1600))
+        assertEquals(1600 to 1200, MmsImage.scaledSize(1600, 1200, 1600))
+        assertEquals(300 to 200, MmsImage.scaledSize(300, 200, 400))
+    }
+
+    @Test
+    fun `nonsense dimensions survive the scaling arithmetic`() {
+        assertEquals(0 to 0, MmsImage.scaledSize(0, 0, 1600))
+        assertEquals(100 to 100, MmsImage.scaledSize(100, 100, 0))
+    }
+
+    @Test
+    fun `the decode keeps enough pixels to scale down to the edge`() {
+        // The pairing that fixes the 137 KB photo: the sample must leave the decode at or
+        // above the edge, because scaledSize refuses to invent pixels. Changing either half
+        // alone sends a smaller picture than the plan promised, silently.
         listOf(
             4032 to MmsImage.LONG_EDGE,
             4032 to 1200,
             4032 to 900,
-            4032 to 400,
             800 to 400,
         ).forEach { (longest, edge) ->
             val sample = MmsImage.sampleSize(longest, edge)
             assertTrue("sample $sample is a power of two", sample and (sample - 1) == 0)
-            assertTrue("$longest at sample $sample is over edge $edge", longest / sample <= edge)
-            if (sample > 1) {
+            assertTrue(
+                "$longest at sample $sample is under edge $edge, so nothing is left to scale",
+                longest / sample >= edge,
+            )
+            if (longest / (sample * 2) > 0) {
                 assertTrue(
-                    "$longest at sample ${sample / 2} would have fit edge $edge, so the sample is too aggressive",
-                    longest / (sample / 2) > edge,
+                    "$longest at sample ${sample * 2} would still clear edge $edge, so it sampled too far",
+                    longest / (sample * 2) < edge,
                 )
             }
         }
+    }
+
+    // Orientation, which the encoder has to bake in because it strips the tag.
+
+    @Test
+    fun `every orientation maps to the turn that makes it upright`() {
+        assertEquals(MmsImage.Transform(0), MmsImage.transform(1))
+        assertEquals(MmsImage.Transform(0, flipX = true), MmsImage.transform(2))
+        assertEquals(MmsImage.Transform(180), MmsImage.transform(3))
+        assertEquals(MmsImage.Transform(0, flipY = true), MmsImage.transform(4))
+        assertEquals(MmsImage.Transform(90, flipX = true), MmsImage.transform(5))
+        assertEquals(MmsImage.Transform(90), MmsImage.transform(6))
+        assertEquals(MmsImage.Transform(270, flipX = true), MmsImage.transform(7))
+        assertEquals(MmsImage.Transform(270), MmsImage.transform(8))
+    }
+
+    @Test
+    fun `an orientation nobody has heard of leaves the picture alone`() {
+        assertEquals(MmsImage.Transform(0), MmsImage.transform(0))
+        assertEquals(MmsImage.Transform(0), MmsImage.transform(9))
+        assertEquals(MmsImage.Transform(0), MmsImage.transform(-1))
+        assertFalse("nothing to do should not report work", MmsImage.transform(1).needed)
+        assertTrue("a 90 degree turn is work", MmsImage.transform(6).needed)
+        assertTrue("a mirror with no turn is work", MmsImage.transform(2).needed)
     }
 }

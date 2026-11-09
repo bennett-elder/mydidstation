@@ -55,6 +55,52 @@ internal object MmsImage {
     fun firstFit(sizes: List<Long>, target: Int = TARGET_BYTES): Int? =
         sizes.indexOfFirst { it <= target }.takeIf { it >= 0 }
 
+    /** How much turning a photo needs before it can be sent without its EXIF tag. */
+    data class Transform(
+        val degrees: Int,
+        val flipX: Boolean = false,
+        val flipY: Boolean = false,
+    ) {
+        val needed: Boolean get() = degrees != 0 || flipX || flipY
+    }
+
+    /**
+     * The turn and mirror that EXIF orientation 1 to 8 asks for.
+     *
+     * Because the encoder strips metadata, the rotation the tag describes has to be applied to
+     * the pixels or it is lost, and an upright photo arrives on its side. 5 and 7 are the two
+     * that need a mirror as well as a turn, which is why this is not just a set of angles.
+     * Anything unrecognised is treated as already upright.
+     */
+    fun transform(orientation: Int): Transform = when (orientation) {
+        2 -> Transform(0, flipX = true)
+        3 -> Transform(180)
+        4 -> Transform(0, flipY = true)
+        5 -> Transform(90, flipX = true)
+        6 -> Transform(90)
+        7 -> Transform(270, flipX = true)
+        8 -> Transform(270)
+        else -> Transform(0)
+    }
+
+    /**
+     * The size to scale a decoded picture down to, so its long edge is the one asked for.
+     *
+     * The decoder only samples in powers of two, so a 4032 pixel photo asked for 1600 comes
+     * back at 1008 and no amount of sampling gets closer. That is what made a 3.39 MB photo
+     * leave as a 137 KB one: it was sent at 1008 pixels wide, 40% of the pixels the plan
+     * promised. Scaling afterwards is what makes the attempt mean what it says.
+     *
+     * Never upscales: a picture already inside the edge is left at its own size, because
+     * inventing pixels costs bytes and buys nothing.
+     */
+    fun scaledSize(width: Int, height: Int, longEdge: Int): Pair<Int, Int> {
+        val longest = maxOf(width, height)
+        if (width <= 0 || height <= 0 || longEdge <= 0 || longest <= longEdge) return width to height
+        val scale = longEdge.toDouble() / longest
+        return maxOf(1, (width * scale).toInt()) to maxOf(1, (height * scale).toInt())
+    }
+
     /**
      * The sample size to decode with for a given edge.
      *
@@ -65,10 +111,11 @@ internal object MmsImage {
     fun sampleSize(longestSide: Int, longEdge: Int): Int {
         if (longEdge <= 0 || longestSide <= 0) return 1
         var sample = 1
-        // Keep halving while the result is still wider than the edge. Testing the *next* sample
-        // against the edge instead left the decoded picture over the edge it asked for, which
-        // is how an attempt ends up bigger than the plan says.
-        while (longestSide / sample > longEdge) sample *= 2
+        // Halve only while the picture stays at or ABOVE the edge, so the decode always has
+        // enough pixels to scale down to it exactly. Sampling to the nearest power of two and
+        // stopping is what sent a 4032 pixel photo as 1008: under the edge, with nothing left
+        // to scale. This and [scaledSize] are a pair, and neither is right alone.
+        while (longestSide / (sample * 2) >= longEdge) sample *= 2
         return sample
     }
 }
