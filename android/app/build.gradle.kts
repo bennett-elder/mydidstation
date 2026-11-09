@@ -101,4 +101,12 @@ dependencies {
     // shapes the vendor documents rather than against a stub written to agree
     // with the code.
     testImplementation("com.squareup.okhttp3:mockwebserver:5.5.0")
+
+    // A tap, checked on the JVM rather than on an emulator. Twice a screen has shipped
+    // with no click handler on its obvious control, and calling functions in a test cannot
+    // see that, because the missing thing is the wiring. The manifest artifact supplies the
+    // host activity the Compose rule starts, and it has to be a debug dependency: Robolectric
+    // reads the debug app manifest, not the unit test one. Robolectric supplies the rest.
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 }

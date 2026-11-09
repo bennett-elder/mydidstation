@@ -441,7 +441,7 @@ fun VoicemailScreen(container: Container, onOpen: (String, String) -> Unit) {
 }
 
 @Composable
-private fun MailboxRowItem(row: MailboxRow, onClick: () -> Unit) {
+internal fun MailboxRowItem(row: MailboxRow, onClick: () -> Unit) {
     Column(
         Modifier
             .fillMaxWidth()
