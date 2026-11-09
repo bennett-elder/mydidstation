@@ -60,9 +60,8 @@ class Sync(
      * Recordings older than the window need a load-more, which does not exist yet.
      */
     suspend fun refreshVoicemails(mailbox: String): Int = withContext(Dispatchers.IO) {
-        val to = System.currentTimeMillis() / 1000
-        val from = to - MAX_RANGE_SECONDS
-        val found = api.voicemails(mailbox, fromSec = from, toSec = to)
+        val window = Windows.first(System.currentTimeMillis() / 1000)
+        val found = api.voicemails(mailbox, fromSec = window.from, toSec = window.to)
         found.forEach {
             store.putVoicemail(
                 mailbox = it.mailbox.ifBlank { mailbox },
@@ -78,8 +77,8 @@ class Sync(
         // Only the first fill sets the floor. A later refresh must not claim the mailbox
         // is covered further back than it is, and it must not move the floor forward
         // either, or a load-more would be undone by an ordinary refresh.
-        if (store.voicemailWindowStart(mailbox) == 0L) store.setVoicemailWindowStart(mailbox, from)
-        reconcile(mailbox, from, to, found)
+        if (store.voicemailWindowStart(mailbox) == 0L) store.setVoicemailWindowStart(mailbox, window.from)
+        reconcile(mailbox, window.from, window.to, found)
         found.size
     }
 
@@ -102,24 +101,15 @@ class Sync(
     /** What the next tap of load-more would pull for this mailbox, so the label is honest. */
     suspend fun voicemailLookBackPlan(mailbox: String): LookBack = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis() / 1000
-        val floor = now - LOOKBACK_FLOOR_SECONDS
-        val covered = store.voicemailWindowStart(mailbox).let { if (it == 0L) now - MAX_RANGE_SECONDS else it }
-        if (covered <= floor) {
-            LookBack(days = 0, more = false)
-        } else {
-            val from = maxOf(covered - MAX_RANGE_SECONDS, floor)
-            LookBack(days = ((covered - from) / DAY_SECONDS).toInt(), more = from > floor)
-        }
+        Windows.lookBackPlan(now, Windows.covered(store.voicemailWindowStart(mailbox), now))
     }
 
     /** Pulls exactly the window [voicemailLookBackPlan] described. Returns rows fetched. */
     suspend fun voicemailLookBack(mailbox: String): Int = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis() / 1000
-        val floor = now - LOOKBACK_FLOOR_SECONDS
-        val covered = store.voicemailWindowStart(mailbox).let { if (it == 0L) now - MAX_RANGE_SECONDS else it }
-        if (covered <= floor) return@withContext 0
-        val from = maxOf(covered - MAX_RANGE_SECONDS, floor)
-        val found = api.voicemails(mailbox, fromSec = from, toSec = covered - 1)
+        val covered = Windows.covered(store.voicemailWindowStart(mailbox), now)
+        val window = Windows.lookBackSpan(now, covered) ?: return@withContext 0
+        val found = api.voicemails(mailbox, fromSec = window.from, toSec = window.to)
         found.forEach {
             store.putVoicemail(
                 mailbox = it.mailbox.ifBlank { mailbox },
@@ -132,8 +122,8 @@ class Sync(
                 listened = it.listened,
             )
         }
-        store.setVoicemailWindowStart(mailbox, from)
-        reconcile(mailbox, from, covered - 1, found)
+        store.setVoicemailWindowStart(mailbox, window.from)
+        reconcile(mailbox, window.from, window.to, found)
         found.size
     }
 
@@ -222,17 +212,17 @@ class Sync(
      * because it predates the app and should not arrive as a badge.
      */
     private suspend fun firstSync(did: String, now: Long): Int {
-        val from = now - INITIAL_WINDOW_SECONDS
-        val added = ingest(did, fetchWindow(did, from, now), unread = false)
-        store.setHistoryStart(did, from)
+        val window = Windows.first(now)
+        val added = ingest(did, fetchWindow(did, window.from, window.to), unread = false)
+        store.setHistoryStart(did, window.from)
         return added
     }
 
     /** Steady state: one window that starts just before the last one ended. */
     private suspend fun poll(did: String, cursor: Long, now: Long): Int {
-        val from = maxOf(cursor - OVERLAP_SECONDS, now - MAX_RANGE_SECONDS)
+        val window = Windows.steady(now, cursor)
         val fresh = mutableListOf<RemoteMsg>()
-        val added = ingest(did, fetchWindow(did, from, now), unread = true, fresh = fresh)
+        val added = ingest(did, fetchWindow(did, window.from, window.to), unread = true, fresh = fresh)
         notifyNew(did, fresh)
         return added
     }
@@ -254,28 +244,15 @@ class Sync(
     /** What the next tap of load-more would pull, so the label can say how much. */
     suspend fun lookBackPlan(did: String): LookBack = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis() / 1000
-        val floor = now - LOOKBACK_FLOOR_SECONDS
-        val covered = coveredFrom(did, now)
-        if (covered <= floor) {
-            LookBack(days = 0, more = false)
-        } else {
-            val from = maxOf(covered - MAX_RANGE_SECONDS, floor)
-            LookBack(
-                days = ((covered - from) / DAY_SECONDS).toInt(),
-                more = from > floor,
-            )
-        }
+        Windows.lookBackPlan(now, coveredFrom(did, now))
     }
 
     /** Pulls exactly the window [lookBackPlan] described. Returns new rows. */
     suspend fun lookBack(did: String): Int = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis() / 1000
-        val floor = now - LOOKBACK_FLOOR_SECONDS
-        val covered = coveredFrom(did, now)
-        if (covered <= floor) return@withContext 0
-        val from = maxOf(covered - MAX_RANGE_SECONDS, floor)
-        val added = ingest(did, fetchWindow(did, from, covered - 1), unread = false)
-        store.setHistoryStart(did, from)
+        val window = Windows.lookBackSpan(now, coveredFrom(did, now)) ?: return@withContext 0
+        val added = ingest(did, fetchWindow(did, window.from, window.to), unread = false)
+        store.setHistoryStart(did, window.from)
         added
     }
 
@@ -283,10 +260,8 @@ class Sync(
      * Oldest instant this number is known to be filled back to. A DID migrated
      * from version 1 has no record, so it is treated as the initial window.
      */
-    private fun coveredFrom(did: String, now: Long): Long {
-        val recorded = store.historyStart(did)
-        return if (recorded > 0) recorded else now - INITIAL_WINDOW_SECONDS
-    }
+    private fun coveredFrom(did: String, now: Long): Long =
+        Windows.covered(store.historyStart(did), now)
 
     /**
      * Stores a window's messages. [fresh] collects the ones that were new and
@@ -364,9 +339,9 @@ class Sync(
         val batch = api.fetchMessages(did, from, to, PAGE_LIMIT)
         if (batch.size < PAGE_LIMIT || depth >= MAX_SPLIT_DEPTH) return batch
         if (from >= to || api.sameApiDay(from, to)) return batch
-        val mid = from + (to - from) / 2
-        return fetchWindow(did, from, mid, depth + 1) +
-            fetchWindow(did, mid + 1, to, depth + 1)
+        val (left, right) = Windows.halves(from, to)
+        return fetchWindow(did, left.from, left.to, depth + 1) +
+            fetchWindow(did, right.from, right.to, depth + 1)
     }
 
     suspend fun refreshAll(): Int = withContext(Dispatchers.IO) {
@@ -431,11 +406,6 @@ class Sync(
         }
 
     private companion object {
-        const val DAY_SECONDS = 24L * 60 * 60
-        const val OVERLAP_SECONDS = DAY_SECONDS
-        const val INITIAL_WINDOW_SECONDS = 30L * DAY_SECONDS
-        const val MAX_RANGE_SECONDS = INITIAL_WINDOW_SECONDS
-        const val LOOKBACK_FLOOR_SECONDS = 2L * 365 * DAY_SECONDS
         const val PAGE_LIMIT = 100
         const val MAX_SPLIT_DEPTH = 3
     }
