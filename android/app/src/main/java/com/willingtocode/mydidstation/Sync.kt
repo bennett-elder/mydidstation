@@ -386,24 +386,51 @@ class Sync(
      * rethrows, so the thread never keeps a message that was never sent.
      */
     suspend fun deliver(did: String, contact: String, body: String, pendingId: Long) =
-        withContext(Dispatchers.IO) {
-            try {
-                val remoteId = api.sendSms(did, contact, body)
-                if (remoteId != null) {
-                    store.confirmPending(pendingId, remoteId)
-                } else {
-                    // No id came back, so this row cannot be matched to the real
-                    // message. Drop it and let the next poll bring that one in.
-                    store.deleteMessage(pendingId)
-                }
-                refreshDid(did)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
+        deliverPending(did, pendingId) { api.sendSms(did, contact, body) }
+
+    /**
+     * Sends one picture, the same way a text is sent.
+     *
+     * Same contract as [deliver] because the same things can go wrong: the row is already on
+     * screen, the API may refuse, and no id may come back. Sharing [deliverPending] is what
+     * keeps the two from drifting apart, since a picture that is left pending after a refusal
+     * looks exactly like a text that is.
+     */
+    suspend fun deliverMms(
+        did: String,
+        contact: String,
+        caption: String,
+        jpeg: ByteArray,
+        pendingId: Long,
+    ) = deliverPending(did, pendingId) { api.sendMms(did, contact, caption, jpeg) }
+
+    /**
+     * Confirms or removes a row that is already on screen, then refreshes the number.
+     *
+     * [send] returns the id the API gave the message, or null when it gave none.
+     */
+    private suspend fun deliverPending(
+        did: String,
+        pendingId: Long,
+        send: suspend () -> Long?,
+    ) = withContext(Dispatchers.IO) {
+        try {
+            val remoteId = send()
+            if (remoteId != null) {
+                store.confirmPending(pendingId, remoteId)
+            } else {
+                // No id came back, so this row cannot be matched to the real message.
+                // Drop it and let the next poll bring that one in.
                 store.deleteMessage(pendingId)
-                throw e
             }
+            refreshDid(did)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            store.deleteMessage(pendingId)
+            throw e
         }
+    }
 
     private companion object {
         const val PAGE_LIMIT = 100

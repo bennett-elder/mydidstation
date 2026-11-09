@@ -11,13 +11,20 @@ host, and the debug config permits 10.0.2.2 alone, which is the emulator's alias
 machine. A phone test needs this machine's LAN address added to
 android/app/src/debug/res/xml/network_security_config.xml.
 
-It answers getDIDsInfo, getMMS, getSMS, sendSMS and the voicemail methods with the shapes
-the real API uses, and it can be told to misbehave, which is hard to arrange against the
-real thing:
+It answers getDIDsInfo, getMMS, getSMS, sendSMS, sendMMS and the voicemail methods with the
+shapes the real API uses, and it can be told to misbehave, which is hard to arrange against
+the real thing:
 
     curl -s localhost:8765/control/state
     curl -s "localhost:8765/control/inbound?did=5551234567&contact=5551110001&text=hello"
     curl -s "localhost:8765/control/mms?count=2&kind=image"
+
+sendMMS is the one method here that the app calls on its way out. It keeps the base64 it is
+given and serves it back at /media/sent-<id>, so a sent picture can be fetched and drawn
+exactly as if it had come from VoIP.ms, which is what lets the app replace the local copy it
+was showing with the server's copy once a poll returns the row. Pass the payload with
+--form-string, not -F: curl reads anything after a semicolon in -F as a form modifier, and
+the data URL is full of them.
     curl -s "localhost:8765/control/mms?kind=garbage"     # lies about its content type
     curl -s "localhost:8765/control/mms?kind=gone"        # the link has expired
     curl -s "localhost:8765/control/mms?kind=huge"        # 24 MB, to prove the cap
@@ -142,6 +149,10 @@ STATE = {
     # with the whole list. That combination is how one message's text ended up stored against
     # another, and it is not something the normal mock can produce by accident.
     "sms_by_id_blind": False,
+    # Attachment bytes stored by sendMMS, keyed by the name the media route serves. A sent
+    # picture has to be fetchable afterwards, or the app cannot show what it sent once the
+    # poll replaces its local copy with the server's.
+    "media_bytes": {},
 }
 
 # The vendor doc's own example shows "hello+john", which implies the API urlencodes
@@ -379,6 +390,12 @@ class Handler(BaseHTTPRequestHandler):
         and something too large to hold in memory.
         """
         name = parsed.path[len("/media/"):]
+        with LOCK:
+            stored = STATE["media_bytes"].get(name)
+        if stored is not None:
+            body, content_type = stored
+            self.log_api(f"media {name} -> {len(body)} bytes (stored)")
+            return self.send_bytes(200, body, content_type)
         self.log_api(f"media {name}")
         if name.startswith("gone"):
             return self.send_bytes(404, b"expired", "text/plain")
@@ -594,6 +611,48 @@ class Handler(BaseHTTPRequestHandler):
                                   fields.get("message", ""), incoming=False)
             self.log_api(f"sendSMS did={message['did']} -> id={message['id']}")
             return self.send_json({"status": "success", "sms": message["id"]})
+
+        if method == "sendMMS":
+            # The shape the app sends: one base64 JPEG behind a data URL, and a caption in
+            # `message`. The bytes are kept so the media route can serve them back, which is
+            # what lets a test see the app replace its local copy with the server's.
+            payload = fields.get("media2", "") or fields.get("media1", "")
+            body, content_type = None, "image/jpeg"
+            if payload.startswith("data:"):
+                header, _, encoded = payload.partition(",")
+                content_type = header[5:].split(";")[0] or "image/jpeg"
+                try:
+                    body = base64.b64decode(encoded)
+                except Exception as error:
+                    self.log_api(f"sendMMS: media2 is not base64 ({error})")
+                    return self.send_json({"status": "invalid_media"})
+            elif payload:
+                # A URL would have to be fetched by the server. Refuse it rather than pretend,
+                # because that path is documented and unused by this app.
+                self.log_api("sendMMS: media1 as a URL is not supported by the mock")
+                return self.send_json({"status": "invalid_media"})
+
+            if payload and not body:
+                # A data URL that decodes to nothing is a caller mistake, and storing it would
+                # produce an attachment link that serves zero bytes, which looks like the
+                # vendor's empty-response trap rather than like the bug it is.
+                self.log_api("sendMMS: media2 decoded to no bytes")
+                return self.send_json({"status": "invalid_media"})
+
+            caption = fields.get("message", "")
+            message = add_message(fields.get("did", ""), fields.get("dst", ""),
+                                  caption, incoming=False)
+            if body is not None:
+                name = f"sent-{message['id']}"
+                with LOCK:
+                    STATE["media_bytes"][name] = (body, content_type)
+                message["media"] = [name]
+            size = len(body) if body is not None else 0
+            self.log_api(
+                f"sendMMS did={message['did']} -> id={message['id']}, "
+                f"media {size} bytes, caption {len(caption)} chars"
+            )
+            return self.send_json({"status": "success", "mms": message["id"]})
 
         # Every voicemail call below is keyed by mailbox, not by DID. The DID-to-mailbox
         # link is the `voicemail` field that getDIDsInfo already returns.

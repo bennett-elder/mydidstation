@@ -225,6 +225,31 @@ class VoipMs(private val settings: ApiSettings) {
     }
 
     /**
+     * One picture, sent as MMS.
+     *
+     * base64 in `media2` is the only route open to us: `media1` takes a URL that VoIP.ms
+     * fetches itself, which would mean hosting the file. Unwrapped, because the documented
+     * shape is one line after the comma.
+     *
+     * What the caller owes this function is a JPEG at or under the size the account accepts.
+     * Measured against the real API on 2026-11-09: the 1.2 MB ceiling counts the file and not
+     * the base64 that carries it, so a 1.15 MB file left here as 1.53 MB of `media2` and
+     * arrived intact.
+     */
+    suspend fun sendMms(did: String, destination: String, caption: String, jpeg: ByteArray): Long? {
+        val json = call(
+            "method" to "sendMMS",
+            "did" to did,
+            "dst" to destination,
+            "message" to caption,
+            "media2" to "data:image/jpeg;base64," + Base64.encodeToString(jpeg, Base64.NO_WRAP),
+        )
+        val status = json.optString("status")
+        if (status != "success") throw ApiException(status)
+        return json.optString("mms").toLongOrNull()
+    }
+
+    /**
      * Every mailbox on the account.
      *
      * The only call that enumerates mailboxes, and a mailbox exists independently of any

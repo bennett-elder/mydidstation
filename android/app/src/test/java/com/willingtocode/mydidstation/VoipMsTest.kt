@@ -1,6 +1,7 @@
 package com.willingtocode.mydidstation
 
 import android.app.Application
+import android.util.Base64
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -335,6 +336,50 @@ class VoipMsTest {
             "the echo repeats the request here, so it should be left out: '$text'",
             text.contains("echoed"),
         )
+    }
+
+    @Test
+    fun `a picture is sent as one line of base64 in media2`() = runBlocking {
+        reply("""{"status":"success","mms":23434}""")
+        // Bytes that are not valid UTF-8 on purpose, so a decode that mangles them shows up as
+        // a mismatch instead of as text that happens to survive.
+        val jpeg = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0x00, 0x7F, 0x80.toByte())
+
+        val id = api().sendMms("5551234567", "5559876543", "look at this", jpeg)
+
+        assertEquals(23434L, id)
+        val body = server.takeRequest().body.readUtf8()
+        assertTrue("method missing from $body", body.contains("sendMMS"))
+        assertTrue("did missing", body.contains("5551234567"))
+        assertTrue("destination missing", body.contains("5559876543"))
+        assertTrue("caption missing", body.contains("look at this"))
+        assertTrue("the media type prefix is missing", body.contains("data:image/jpeg;base64,"))
+        // The payload is the exact bytes in one line: a wrapped value is not the documented
+        // shape and would be a different string on the wire.
+        val expected = Base64.encodeToString(jpeg, Base64.NO_WRAP)
+        assertTrue("payload missing", body.contains(expected))
+        assertFalse("the base64 was wrapped", expected.contains("\n"))
+    }
+
+    @Test
+    fun `a refused picture throws the status it was given`() = runBlocking {
+        reply("""{"status":"invalid_dst"}""")
+        val failure = runCatching {
+            api().sendMms("5551234567", "5559876543", "x", byteArrayOf(1, 2, 3))
+        }.exceptionOrNull()
+        assertTrue("expected an ApiException, got $failure", failure is ApiException)
+        assertEquals("invalid_dst", (failure as ApiException).status)
+    }
+
+    @Test
+    fun `a caption at the documented maximum is passed through untouched`() = runBlocking {
+        // What a recipient receives is cut at 2000 characters, measured on 2026-11-09, but that
+        // is not this layer's decision: it sends what it is given and reports what comes back.
+        reply("""{"status":"success","mms":23435}""")
+        val caption = "x".repeat(2048)
+        api().sendMms("5551234567", "5559876543", caption, byteArrayOf(1))
+        val body = server.takeRequest().body.readUtf8()
+        assertTrue("the caption was trimmed or altered", body.contains(caption))
     }
 
     @Test

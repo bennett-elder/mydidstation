@@ -12,6 +12,7 @@ import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.compose.foundation.background
@@ -83,6 +84,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import android.net.Uri
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -1471,11 +1473,45 @@ fun MessagesScreen(
     var refreshing by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
+    // A picture that has been picked and shrunk, ready to send. Held as bytes rather than as a
+    // URI so the size on screen is the size that goes, and so sending does not read the file
+    // again on the way out.
+    var picture by remember { mutableStateOf<ByteArray?>(null) }
+    var pictureUri by remember { mutableStateOf<Uri?>(null) }
+    var pictureNote by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+
+    val pickPicture = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { picked ->
+        if (picked == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            pictureNote = "preparing…"
+            val encoded = withContext(Dispatchers.IO) {
+                runCatching {
+                    context.contentResolver.openInputStream(picked)?.use { MmsEncoder.encode(it) }
+                }.getOrNull()
+            }
+            if (encoded == null) {
+                picture = null
+                pictureUri = null
+                pictureNote = "that picture could not be reduced to a size that sends"
+            } else {
+                picture = encoded
+                pictureUri = picked
+                pictureNote = "${encoded.size / 1024} KB"
+            }
+        }
+    }
+
     suspend fun reload() {
         messages = if (resolvedId == 0L) emptyList() else withContext(Dispatchers.IO) {
             container.store.markConversationRead(resolvedId)
             container.store.messages(resolvedId)
         }
+        // Pictures are only kept for rows that still exist, so a send that failed takes its
+        // picture with it instead of leaving it in a map for the life of the process.
+        PendingMedia.retain(messages.map { it.id }.toSet())
         // Reading it here is what makes its notification pointless.
         if (resolvedContact.isNotEmpty()) container.notifier.cancel(did, resolvedContact)
     }
@@ -1554,11 +1590,18 @@ fun MessagesScreen(
     // Existing history settles it. Something arrived from this number, so the number works,
     // and the app has no business refusing to answer it because it is shorter than a phone
     // number. The length rule only covers a destination typed into an empty thread.
-    val canSend = (resolvedId != 0L || PhoneNumbers.isSendable(to)) && draft.isNotBlank()
+    // A picture can go without a caption, and a caption can go without a picture, but not
+    // neither. The API requires the message field even when there is media, so a picture sent
+    // with nothing typed carries a single space rather than an empty value.
+    val canSend = (resolvedId != 0L || PhoneNumbers.isSendable(to)) &&
+        (draft.isNotBlank() || picture != null)
 
     fun send() {
         if (!canSend || sending) return
-        val body = draft.trim()
+        val jpeg = picture
+        val pickedUri = pictureUri
+        val typed = draft.trim()
+        val body = if (typed.isEmpty() && jpeg != null) " " else typed
         val toContact = sendableContact
         scope.launch {
             sending = true
@@ -1573,13 +1616,23 @@ fun MessagesScreen(
             resolvedId = withContext(Dispatchers.IO) {
                 container.store.ensureConversation(did, toContact)
             }
-            // The bubble is in the thread before the request goes out.
+            // The bubble is in the thread before the request goes out, and it can draw the
+            // picture straight away because the file is registered against the row.
+            if (jpeg != null && pickedUri != null) PendingMedia.put(pendingId, pickedUri)
             reload()
             try {
-                container.sync.deliver(did, toContact, body, pendingId)
+                if (jpeg != null) {
+                    container.sync.deliverMms(did, toContact, body, jpeg, pendingId)
+                } else {
+                    container.sync.deliver(did, toContact, body, pendingId)
+                }
+                picture = null
+                pictureUri = null
+                pictureNote = null
             } catch (e: Exception) {
                 error = e.message ?: "send failed"
-                draft = body
+                // Both come back so the retry is one tap, not a re-pick.
+                draft = typed
             } finally {
                 reload()
                 sending = false
@@ -1708,6 +1761,26 @@ fun MessagesScreen(
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         )
                                     }
+                                    // A picture on its way out has no server URL yet, so it is
+                                    // drawn from the local file the composer registered against
+                                    // this row. The guard is the absence of media rather than the
+                                    // pending flag, because the row stops being pending the
+                                    // moment the API answers and the server's copy only arrives
+                                    // with the next poll. Until then this is what there is.
+                                    if (message.media.isEmpty()) {
+                                        val localPicture = PendingMedia.of(message.id)
+                                        if (localPicture != null) {
+                                            AsyncImage(
+                                                model = localPicture,
+                                                contentDescription = "Attachment being sent",
+                                                contentScale = ContentScale.Fit,
+                                                modifier = Modifier
+                                                    .padding(top = 4.dp)
+                                                    .heightIn(max = 240.dp)
+                                                    .clip(MaterialTheme.shapes.small),
+                                            )
+                                        }
+                                    }
                                     message.media.forEach { url ->
                                         AttachmentLine(container, url)
                                     }
@@ -1759,11 +1832,44 @@ fun MessagesScreen(
             }
 
             Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                // The picked picture, with the way to take it back out. The note is also where
+                // a picture that would not shrink reports itself.
+                if (picture != null || pictureNote != null) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            if (picture != null) "Picture ready  ·  $pictureNote" else pictureNote.orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        if (picture != null) {
+                            TextButton(
+                                onClick = {
+                                    picture = null
+                                    pictureUri = null
+                                    pictureNote = null
+                                },
+                            ) { Text("Remove") }
+                        }
+                    }
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                    // No storage permission: PickVisualMedia hands back a readable URI, which
+                    // is the whole reason the app can attach a picture without asking for one.
+                    TextButton(
+                        onClick = {
+                            pickPicture.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                            )
+                        },
+                        enabled = !sending,
+                    ) { Text("Photo") }
                     OutlinedTextField(
                         value = draft,
                         onValueChange = { draft = it },
@@ -1784,8 +1890,18 @@ fun MessagesScreen(
                     }
                 }
 
-                val analysis = Sms.analyze(draft)
-                Text(
+                if (picture != null) {
+                    val over = !MmsCaption.fits(draft)
+                    Text(
+                        "${draft.length} / ${MmsCaption.LIMIT} characters" +
+                            if (over) "  ·  past the limit and the end will not arrive" else "",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (over) MaterialTheme.colorScheme.error else Color.Unspecified,
+                        modifier = Modifier.padding(start = 4.dp, top = 4.dp),
+                    )
+                }
+                val analysis = if (picture != null) null else Sms.analyze(draft)
+                if (analysis != null) Text(
                     buildString {
                         append(analysis.units).append(" / ").append(analysis.budget)
                         if (analysis.segments > 1) append("  ·  ").append(analysis.segments).append(" parts")
@@ -1795,7 +1911,7 @@ fun MessagesScreen(
                     style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier.padding(start = 4.dp, top = 4.dp),
                 )
-                if (analysis.segments > 1) {
+                if (analysis != null && analysis.segments > 1) {
                     val parts = Sms.parts(draft, analysis)
                     parts.dropLast(1).take(3).forEachIndexed { index, part ->
                         Text(

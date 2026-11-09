@@ -2,8 +2,12 @@ package com.willingtocode.mydidstation
 
 import android.app.Application
 import android.content.Context
+import android.net.Uri
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -14,6 +18,7 @@ import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -56,6 +61,8 @@ class ScreenTapsTest {
         context = RuntimeEnvironment.getApplication()
         context.getSharedPreferences(Settings.PREFS, Context.MODE_PRIVATE).edit().clear().commit()
         asked.clear()
+        // The picture map is process-wide, so one test must not inherit another's entry.
+        PendingMedia.clear()
 
         server = MockWebServer()
         server.dispatcher = object : Dispatcher() {
@@ -192,6 +199,154 @@ class ScreenTapsTest {
         compose.onNodeWithText("Send").performClick()
 
         compose.waitUntil(timeoutMillis = PATIENCE_MS) { asked.contains("sendSMS") }
+    }
+
+    @Test
+    fun `the composer offers a picture and refuses an empty send`() {
+        // The picker cannot be driven from a JVM test, so what is pinned here is the wiring
+        // around it: the control exists, and Send stays disabled until there is something to
+        // send. A composer that quietly enables Send with nothing in it is the bug this catches.
+        val container = configured()
+        val convId = seedConversation(container)
+
+        compose.setContent {
+            MyDidStationTheme {
+                MessagesScreen(
+                    container = container,
+                    did = did,
+                    conversationId = convId,
+                    contact = them,
+                    onBack = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("Photo").assertExists()
+        compose.onNodeWithText("Send").assertIsNotEnabled()
+
+        compose.onNode(hasSetTextAction()).performTextInput("hello")
+        compose.waitForIdle()
+        compose.onNodeWithText("Send").assertIsEnabled()
+    }
+
+    @Test
+    fun `a pending picture is drawn from the local file`() {
+        // The row has no server media yet, so the only thing that can draw anything is the URI
+        // the composer registered. Coil cannot decode under Robolectric, so this pins that the
+        // bubble offers the node at all, which is the wiring rather than the decoding.
+        val container = configured()
+        seedConversation(container)
+        val pendingId = container.store.insertPending(did, them, "", System.currentTimeMillis() / 1000)
+        assertTrue("the pending row was not created", pendingId > 0)
+        PendingMedia.put(pendingId, Uri.parse("content://probe/picture.jpg"))
+
+        compose.setContent {
+            MyDidStationTheme {
+                MessagesScreen(
+                    container = container,
+                    did = did,
+                    conversationId = container.store.ensureConversation(did, them),
+                    contact = them,
+                    onBack = {},
+                )
+            }
+        }
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithContentDescription("Attachment being sent")
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+    }
+
+    @Test
+    fun `the server copy wins once it has arrived`() {
+        // The bridge is only for the gap: a row that already carries the API's media must draw
+        // that, not the local file, or a sent picture would keep being drawn from the phone
+        // forever and a cached copy could disagree with the server's.
+        val container = configured()
+        container.store.putDid(did)
+        container.store.upsertRemote(
+            did = did,
+            contact = them,
+            remoteId = 9002,
+            incoming = false,
+            body = "",
+            media = listOf("https://example.test/media.jpg"),
+            sentAt = System.currentTimeMillis() / 1000,
+            unread = false,
+            carrierStatus = "",
+        )
+        val rowId = container.store.messages(container.store.ensureConversation(did, them)).first().id
+        PendingMedia.put(rowId, Uri.parse("content://probe/local.jpg"))
+
+        compose.setContent {
+            MyDidStationTheme {
+                MessagesScreen(
+                    container = container,
+                    did = did,
+                    conversationId = container.store.ensureConversation(did, them),
+                    contact = them,
+                    onBack = {},
+                )
+            }
+        }
+        compose.waitForIdle()
+
+        assertTrue(
+            "the local file was drawn over the server copy",
+            compose.onAllNodesWithContentDescription("Attachment being sent")
+                .fetchSemanticsNodes().isEmpty(),
+        )
+    }
+
+    @Test
+    fun `a pending row with no local file draws no picture`() {
+        // The other half of the guard: same row, same empty media, no entry in the map.
+        val container = configured()
+        seedConversation(container)
+        val pendingId = container.store.insertPending(did, them, "", System.currentTimeMillis() / 1000)
+        assertTrue("the pending row was not created", pendingId > 0)
+
+        compose.setContent {
+            MyDidStationTheme {
+                MessagesScreen(
+                    container = container,
+                    did = did,
+                    conversationId = container.store.ensureConversation(did, them),
+                    contact = them,
+                    onBack = {},
+                )
+            }
+        }
+        compose.waitForIdle()
+
+        assertTrue(
+            "something drew a picture with nothing to draw",
+            compose.onAllNodesWithContentDescription("Attachment being sent")
+                .fetchSemanticsNodes().isEmpty(),
+        )
+    }
+
+    @Test
+    fun `without a picture the counter is the SMS one`() {
+        // Attaching a picture switches this to the 2000 character MMS rule, and that display
+        // only appears with a picture, so the SMS analysis is what must still be here.
+        val container = configured()
+        val convId = seedConversation(container)
+
+        compose.setContent {
+            MyDidStationTheme {
+                MessagesScreen(
+                    container = container,
+                    did = did,
+                    conversationId = convId,
+                    contact = them,
+                    onBack = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("0 / 160").assertExists()
     }
 
     @Test

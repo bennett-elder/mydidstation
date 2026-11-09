@@ -727,6 +727,23 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
                     "message", patch, "did = ? AND remote_id = ?",
                     arrayOf(did, remoteId.toString()),
                 )
+                // A picture sent from this app starts life as a pending row with no media,
+                // because the file is local until the server has it. The server's copy is
+                // the row the poll brings back, so the attachment columns are filled when
+                // they are empty. Only when they are empty: a stored URL is not replaced by
+                // a later answer, which keeps a repeat poll from churning the row.
+                if (media.isNotEmpty()) {
+                    val fill = ContentValues().apply {
+                        put("media1", media.getOrNull(0) ?: "")
+                        put("media2", media.getOrNull(1) ?: "")
+                        put("media3", media.getOrNull(2) ?: "")
+                    }
+                    db.update(
+                        "message", fill,
+                        "did = ? AND remote_id = ? AND media1 = '' AND media2 = '' AND media3 = ''",
+                        arrayOf(did, remoteId.toString()),
+                    )
+                }
             }
             db.setTransactionSuccessful()
             row != -1L
