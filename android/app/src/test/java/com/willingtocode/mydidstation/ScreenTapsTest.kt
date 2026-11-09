@@ -387,13 +387,18 @@ class ScreenTapsTest {
         compose.waitForIdle()
         compose.onNodeWithText("Send").performClick()
         compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithText("HTTP 500").fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithText("HTTP 500 from sendSMS").fetchSemanticsNodes().isNotEmpty()
         }
 
-        // The next refresh succeeds, and the complaint has to go.
-        compose.onNode(hasScrollAction()).performTouchInput { swipeDown() }
+        // The next refresh succeeds, and the complaint has to go. The drag is given an
+        // explicit length rather than the node's height: the list is short in this test window,
+        // and a pull that stops a few pixels short of the trigger distance made this test
+        // depend on the height of whatever was drawn below it.
+        compose.onNode(hasScrollAction()).performTouchInput {
+            swipeDown(startY = 0f, endY = 1_200f, durationMillis = 600)
+        }
         compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithText("HTTP 500").fetchSemanticsNodes().isEmpty()
+            compose.onAllNodesWithText("HTTP 500 from sendSMS").fetchSemanticsNodes().isEmpty()
         }
     }
 
@@ -414,4 +419,5 @@ class ScreenTapsTest {
         compose.waitUntil(timeoutMillis = PATIENCE_MS) { container.settings.credentials() != null }
         assertEquals("user@example.com" to "secret", container.settings.credentials())
     }
+
 }

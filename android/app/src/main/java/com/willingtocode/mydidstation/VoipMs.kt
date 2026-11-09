@@ -1,6 +1,7 @@
 package com.willingtocode.mydidstation
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MultipartBody
@@ -25,6 +26,50 @@ class ApiException(val status: String) : Exception("VoIP.ms returned status=$sta
  * which means the mailbox, folder and number did not name a recording at all.
  */
 class AudioUnavailable(message: String) : Exception(message)
+
+/**
+ * A response that was not successful, carrying what it takes to decide whether asking again
+ * could help.
+ *
+ * The status code alone is not enough to act on: 503 and a wrong password both read as a
+ * failure here, and one is worth another attempt while the other never will be.
+ */
+class HttpFailure(
+    val code: Int,
+    val method: String,
+    val retryAfterMillis: Long?,
+) : IOException("HTTP $code from $method")
+
+/**
+ * How many times a read is asked, and the wait before each retry.
+ *
+ * Three, matching the voicemail audio rule, because this is the same situation: a server that
+ * says not now rather than never. The waits stay in the hundreds of milliseconds rather than
+ * climbing, because one refresh issues several calls and a long ladder would hold the spinner
+ * while the next poll queues up behind it.
+ */
+internal const val READ_HTTP_ATTEMPTS = 3
+internal const val READ_HTTP_RETRY_MS = 200L
+
+/** The longest `Retry-After` this app will sit through, whatever the server asks for. */
+internal const val READ_HTTP_RETRY_AFTER_CAP_MS = 2_000L
+
+/** True for the statuses that mean "not now": a busy server, a gateway, or a rate limit. */
+internal fun worthAnotherAttempt(code: Int): Boolean = code == 429 || code >= 500
+
+/**
+ * The wait before one retry of a read.
+ *
+ * The server's own `Retry-After` wins when it sends one, capped, because a long one is better
+ * answered by giving up and letting the next poll try than by holding this one open. Otherwise
+ * the wait grows by one step per attempt.
+ */
+internal fun readRetryDelayMs(attempt: Int, retryAfterMillis: Long?): Long {
+    if (retryAfterMillis != null && retryAfterMillis > 0) {
+        return minOf(retryAfterMillis, READ_HTTP_RETRY_AFTER_CAP_MS)
+    }
+    return READ_HTTP_RETRY_MS * (attempt + 1)
+}
 
 
 /** One number the account reports, and whether the account can message on it. */
@@ -101,7 +146,47 @@ class VoipMs(private val settings: ApiSettings) {
     private suspend fun call(vararg params: Pair<String, String>): JSONObject =
         call(http, *params)
 
+    /**
+     * A read: asked again when the server says not now.
+     *
+     * Reads are free and idempotent, so the only cost of another attempt is a moment of the
+     * user's patience, and the alternative is a banner about a number that was already on its
+     * way to being listed. Anything that is not a "not now" status is thrown on the first
+     * answer, because a wrong parameter does not heal.
+     */
     private suspend fun call(client: OkHttpClient, vararg params: Pair<String, String>): JSONObject =
+        withContext(Dispatchers.IO) {
+            var last: HttpFailure? = null
+            for (attempt in 0 until READ_HTTP_ATTEMPTS) {
+                try {
+                    return@withContext once(client, *params)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: HttpFailure) {
+                    if (!worthAnotherAttempt(e.code)) throw e
+                    last = e
+                    if (attempt < READ_HTTP_ATTEMPTS - 1) {
+                        delay(readRetryDelayMs(attempt, e.retryAfterMillis))
+                    }
+                }
+            }
+            throw last ?: HttpFailure(0, "the request", null)
+        }
+
+    /**
+     * A write: one attempt, and its failure is the answer.
+     *
+     * `sendSMS` and `sendMMS` carry no idempotency key, so asking again after a 503 the server
+     * had already processed sends the message twice and charges for both. Measured on a real
+     * account, 2026-11-09: a send answered with a 503 and the picture arrived anyway, which is
+     * exactly the answer that a retry would have doubled. A refused send is reported instead,
+     * and the pending row plus the next poll work out what actually happened.
+     */
+    private suspend fun write(client: OkHttpClient, vararg params: Pair<String, String>): JSONObject =
+        once(client, *params)
+
+    /** One request, with no opinion about whether to repeat it. */
+    private suspend fun once(client: OkHttpClient, vararg params: Pair<String, String>): JSONObject =
         withContext(Dispatchers.IO) {
             val creds = settings.credentials() ?: throw IllegalStateException("Not configured")
             val form = MultipartBody.Builder().setType(MultipartBody.FORM).apply {
@@ -110,8 +195,17 @@ class VoipMs(private val settings: ApiSettings) {
                 params.forEach { (k, v) -> addFormDataPart(k, v) }
             }.build()
             val request = Request.Builder().url(settings.endpoint()).post(form).build()
+            // The method is named in the failure because "HTTP 503" on its own is ambiguous in
+            // the one place it gets shown: a send that may already have gone and a poll that
+            // did not want opposite reactions, and the banner cannot tell them apart. Measured
+            // 2026-11-09, a 503 next to the send button while the message had in fact arrived:
+            // the text was all the app had to go on and it was not enough.
+            val method = params.firstOrNull { it.first == "method" }?.second ?: "the request"
             client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                if (!response.isSuccessful) {
+                    val after = response.header("Retry-After")?.trim()?.toLongOrNull()
+                    throw HttpFailure(response.code, method, after?.times(1000))
+                }
                 JSONObject(response.body.string())
             }
         }
@@ -230,7 +324,8 @@ class VoipMs(private val settings: ApiSettings) {
         dateFormat.format(Date(a * 1000)) == dateFormat.format(Date(b * 1000))
 
     suspend fun sendSms(did: String, destination: String, body: String): Long? {
-        val json = call(
+        val json = write(
+            http,
             "method" to "sendSMS",
             "did" to did,
             "dst" to destination,
@@ -254,7 +349,7 @@ class VoipMs(private val settings: ApiSettings) {
      * arrived intact.
      */
     suspend fun sendMms(did: String, destination: String, caption: String, jpeg: ByteArray): Long? {
-        val json = call(
+        val json = write(
             uploadHttp,
             "method" to "sendMMS",
             "did" to did,
@@ -480,7 +575,8 @@ class VoipMs(private val settings: ApiSettings) {
         messageNum: Int,
         listened: Boolean,
     ) {
-        val json = call(
+        val json = write(
+            http,
             "method" to "markListenedVoicemailMessage",
             "mailbox" to mailbox,
             "folder" to folder,

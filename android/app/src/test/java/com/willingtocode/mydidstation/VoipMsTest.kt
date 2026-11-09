@@ -7,9 +7,11 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import java.io.IOException
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -490,4 +492,83 @@ class VoipMsTest {
         assertFalse(api.sameApiDay(lateEvening, apiDay(2026, 7, 2, 0, 30)))
     }
 
+
+    // Retry policy: reads ask again, writes never do.
+
+    @Test
+    fun `a read that is told not now is asked again and succeeds`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(503))
+        reply("""{"status":"success","dids":[{"did":"5551234567","sms_enabled":"1"}]}""")
+
+        val found = api().discoverDids()
+
+        assertEquals(1, found.size)
+        assertEquals("one retry, so two requests", 2, server.requestCount)
+    }
+
+    @Test
+    fun `a read that keeps saying not now gives up after three attempts`() = runBlocking {
+        repeat(READ_HTTP_ATTEMPTS) { server.enqueue(MockResponse().setResponseCode(503)) }
+
+        val failure = assertThrows(IOException::class.java) {
+            runBlocking { api().discoverDids() }
+        }
+
+        assertEquals("HTTP 503 from getDIDsInfo", failure.message)
+        assertEquals(READ_HTTP_ATTEMPTS, server.requestCount)
+    }
+
+    @Test
+    fun `a read that is refused for a reason does not ask again`() = runBlocking {
+        // 403 will not heal, and three attempts at it is three times the wait for the same
+        // answer. Only the not-now statuses are worth repeating. Three answers are queued so
+        // that a regression which does retry fails on the count: with one queued answer,
+        // MockWebServer holds the second request open instead of answering it, and the test
+        // hangs rather than reporting.
+        repeat(READ_HTTP_ATTEMPTS) { server.enqueue(MockResponse().setResponseCode(403)) }
+
+        assertThrows(IOException::class.java) { runBlocking { api().discoverDids() } }
+
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun `a send is never asked again, and its failure is reported`() = runBlocking {
+        // The rule that costs money if it is wrong: no idempotency key, so a second attempt
+        // after a 503 the server had already processed sends the message twice.
+        server.enqueue(MockResponse().setResponseCode(503))
+
+        val failure = assertThrows(HttpFailure::class.java) {
+            runBlocking { api().sendSms("5551234567", "5559990009", "hello") }
+        }
+
+        assertEquals(503, failure.code)
+        assertEquals("sendSMS", failure.method)
+        assertEquals("427 not 429, and one attempt not three", 1, server.requestCount)
+    }
+
+    @Test
+    fun `only the statuses that mean not now are worth another attempt`() {
+        assertTrue(worthAnotherAttempt(429))
+        assertTrue(worthAnotherAttempt(500))
+        assertTrue(worthAnotherAttempt(502))
+        assertTrue(worthAnotherAttempt(503))
+        assertTrue(worthAnotherAttempt(504))
+        assertFalse(worthAnotherAttempt(400))
+        assertFalse(worthAnotherAttempt(401))
+        assertFalse(worthAnotherAttempt(403))
+        assertFalse(worthAnotherAttempt(404))
+    }
+
+    @Test
+    fun `the wait grows a step at a time and honours a capped Retry-After`() {
+        assertEquals(READ_HTTP_RETRY_MS, readRetryDelayMs(0, null))
+        assertEquals(READ_HTTP_RETRY_MS * 2, readRetryDelayMs(1, null))
+        assertEquals(1_000L, readRetryDelayMs(0, 1_000L))
+        assertEquals(
+            "a server asking for a minute gets the cap and then we give up instead",
+            READ_HTTP_RETRY_AFTER_CAP_MS,
+            readRetryDelayMs(0, 60_000L),
+        )
+    }
 }
