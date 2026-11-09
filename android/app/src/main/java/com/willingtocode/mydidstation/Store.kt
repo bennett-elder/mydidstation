@@ -274,35 +274,17 @@ class Store(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION) {
      * renamed. A conversation keyed `189866` that also has a `89866` neighbour is merged
      * into the neighbour, because the user has replied to both spellings at different times
      * and the history belongs in one place.
-     */
-    /**
-     * The v11 rule, frozen at the version that needed it.
      *
-     * Deliberately not a call into `VoipMs.normalizePhone`. A migration is a statement about
-     * how data looked at one version, so it has to keep behaving the same way forever. If the
-     * live rule later learns something new, a user upgrading from v10 to a much later version
-     * would get different repairs than a user who upgraded at v11, from identical data, and no
-     * test would ever catch it because tests run the chain once.
-     *
-     * Never edit this, and never call it from anything but the v11 step.
+     * The rule itself is frozen in [Migrations.stripCountryCodeV11]: a migration has to keep
+     * doing what it did on the day it shipped, even after the live rule learns something new.
      */
-    private fun stripCountryCodeV11(digits: String): String {
-        if (!digits.startsWith("1")) return digits
-        val rest = digits.drop(1)
-        return when {
-            rest.length == 10 -> rest
-            rest.length in 5..6 && rest.first() in '2'..'9' -> rest
-            else -> digits
-        }
-    }
-
     private fun rekeyShortCodes(db: SQLiteDatabase) {
         val stale = mutableListOf<StaleContact>()
         db.rawQuery("SELECT id, did, contact FROM conversation WHERE contact LIKE '1%'", null)
             .use { c ->
                 while (c.moveToNext()) {
                     val contact = c.getString(2)
-                    val fixed = stripCountryCodeV11(contact)
+                    val fixed = Migrations.stripCountryCodeV11(contact)
                     if (fixed != contact) {
                         stale.add(StaleContact(c.getLong(0), c.getString(1), contact, fixed))
                     }
