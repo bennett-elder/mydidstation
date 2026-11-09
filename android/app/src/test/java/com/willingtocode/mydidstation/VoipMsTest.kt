@@ -318,64 +318,6 @@ class VoipMsTest {
     }
 
     @Test
-    fun `a shortcode can be replied to`() {
-        // The reply that stops marketing traffic. Seven digits used to be the floor, so the
-        // compose field refused every shortcode and the app could not send STOP.
-        assertTrue(VoipMs.isSendable("22395"))
-        assertTrue(VoipMs.isSendable("32665"))
-    }
-
-    @Test
-    fun `a normal number in any shape is sendable`() {
-        assertTrue(VoipMs.isSendable("5551234567"))
-        assertTrue(VoipMs.isSendable("(555) 123-4567"))
-        assertTrue(VoipMs.isSendable("+1 555 123 4567"))
-        assertTrue(VoipMs.isSendable("+44 20 7946 0958"))
-    }
-
-    @Test
-    fun `an empty or nonsense destination is not sendable`() {
-        assertFalse(VoipMs.isSendable(""))
-        assertFalse(VoipMs.isSendable("   "))
-        assertFalse(VoipMs.isSendable("123"))
-        assertFalse(VoipMs.isSendable("1234567890123456"))
-    }
-
-    @Test
-    fun `a short code loses the country code the API added`() {
-        // What the API actually sends for a five digit sender. Replying to the unstripped
-        // form is answered with malformed-invalid-to-number, because it is not a number.
-        assertEquals("89866", VoipMs.normalizePhone("189866"))
-        assertEquals("898661", VoipMs.normalizePhone("1898661"))
-    }
-
-    @Test
-    fun `a number loses its country code as it always did`() {
-        assertEquals("8885551234", VoipMs.normalizePhone("18885551234"))
-        assertEquals("5551234567", VoipMs.normalizePhone("(555) 123-4567"))
-    }
-
-    @Test
-    fun `a short code with no prefix is left alone`() {
-        assertEquals("89866", VoipMs.normalizePhone("89866"))
-    }
-
-    @Test
-    fun `a short code that starts with one keeps its digits`() {
-        // Somewhere other than NANP, a five digit code may begin with 1. The allocated
-        // ranges say US and Canadian codes never do, so a remainder that starts with 1 is
-        // not one, and stripping it would invent a different destination.
-        assertEquals("112345", VoipMs.normalizePhone("112345"))
-    }
-
-    @Test
-    fun `a value that is neither a number nor a short code is untouched`() {
-        assertEquals("", VoipMs.normalizePhone(""))
-        assertEquals("123", VoipMs.normalizePhone("123"))
-        assertEquals("15551234", VoipMs.normalizePhone("15551234"))
-    }
-
-    @Test
     fun `a five character payload shows what it says`() = runBlocking {
         // The count alone was not enough to tell a sentinel from a broken body: five
         // characters, none of them outside the alphabet, is what the phones reported for
@@ -503,13 +445,4 @@ class VoipMsTest {
         assertFalse(api.sameApiDay(lateEvening, apiDay(2026, 7, 2, 0, 30)))
     }
 
-    @Test
-    fun `the sendable range starts at a short code and ends at fifteen digits`() {
-        // Both ends are refusals people meet in the composer: a truncated paste, and a wall
-        // of digits. The middle is what has to keep working.
-        assertFalse("four digits is shorter than any short code", VoipMs.isSendable("2239"))
-        assertTrue("five digits is a short code", VoipMs.isSendable("22395"))
-        assertTrue("fifteen digits is the E.164 ceiling", VoipMs.isSendable("123456789012345"))
-        assertFalse("sixteen digits is past it", VoipMs.isSendable("1234567890123456"))
-    }
 }

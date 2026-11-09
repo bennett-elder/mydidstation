@@ -1535,7 +1535,7 @@ fun MessagesScreen(
             reload()
             return@LaunchedEffect
         }
-        val normalized = VoipMs.normalizePhone(to)
+        val normalized = PhoneNumbers.normalizePhone(to)
         // No length rule here. A query is local, and history is the strongest evidence that a
         // destination is real: a shortcode that can reach us is a shortcode we can answer.
         if (normalized.isNotEmpty()) {
@@ -1550,11 +1550,11 @@ fun MessagesScreen(
         reload()
     }
 
-    val sendableContact = VoipMs.normalizePhone(to)
+    val sendableContact = PhoneNumbers.normalizePhone(to)
     // Existing history settles it. Something arrived from this number, so the number works,
     // and the app has no business refusing to answer it because it is shorter than a phone
     // number. The length rule only covers a destination typed into an empty thread.
-    val canSend = (resolvedId != 0L || VoipMs.isSendable(to)) && draft.isNotBlank()
+    val canSend = (resolvedId != 0L || PhoneNumbers.isSendable(to)) && draft.isNotBlank()
 
     fun send() {
         if (!canSend || sending) return
