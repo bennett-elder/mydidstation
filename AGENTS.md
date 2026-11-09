@@ -13,6 +13,20 @@ tools, and it is plain Markdown for everyone else.
 **Under 72 characters, one line.** No body, no trailers, no `Co-Authored-By`.
 History is read as a changelog.
 
+## Reporting
+
+How a session talks to the person running it. What these prevent is a plan or a finding that
+scrolls away under tool output before it can be read.
+
+- **Say what the tools are for, then run them.** One line before the call about what it is
+  about to check and why, so the output has a question behind it.
+- **The durable content goes last.** Work and tool output first, the summary after, so the last
+  thing on screen is the thing to read. Never open a turn with a plan and then bury it.
+- **Tool output is a verdict, not a transcript.** A build result, a test count, a diff stat.
+  Full logs go to a file and stay there unless something needs reading.
+- **One turn, one question.** Asked for a plan, the plan is the answer and the turn ends. Act
+  on "continue", not alongside "what are the options".
+
 ## Permission
 
 Discussion is not approval. Planning, explaining, answering a question, or agreeing a
