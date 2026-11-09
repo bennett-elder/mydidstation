@@ -5,6 +5,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
@@ -12,6 +13,8 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeDown
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -51,6 +54,9 @@ class ScreenTapsTest {
     private lateinit var context: Context
 
     private val asked = CopyOnWriteArrayList<String>()
+
+    /** When true, the next sendSMS is refused and the switch resets itself. */
+    private var failNextSend = false
     private val methods = listOf("getDIDsInfo", "getMMS", "getSMS", "sendSMS", "getVoicemails")
 
     private val did = "5551234567"
@@ -70,6 +76,11 @@ class ScreenTapsTest {
                 val form = request.body.readUtf8()
                 methods.filter { form.contains(it) }.forEach { asked += it }
                 return when {
+                    form.contains("sendSMS") && failNextSend -> {
+                        failNextSend = false
+                        MockResponse().setResponseCode(500)
+                    }
+
                     form.contains("sendSMS") ->
                         MockResponse().setBody("""{"status":"success","sms":91001}""")
 
@@ -347,6 +358,43 @@ class ScreenTapsTest {
         }
 
         compose.onNodeWithText("0 / 160").assertExists()
+    }
+
+    @Test
+    fun `a refresh that works clears what the last one complained about`() {
+        // A send that timed out on this side and arrived on the other leaves a complaint in the
+        // pane, and the thread fills in behind it. Without this the pane keeps arguing with the
+        // messages under it until the next send.
+        val container = configured()
+        val convId = seedConversation(container)
+        // The dispatcher answers everything, so a failure has to come from it rather than from
+        // enqueue: a custom dispatcher and a queue cannot coexist.
+        failNextSend = true
+
+        compose.setContent {
+            MyDidStationTheme {
+                MessagesScreen(
+                    container = container,
+                    did = did,
+                    conversationId = convId,
+                    contact = them,
+                    onBack = {},
+                )
+            }
+        }
+
+        compose.onNode(hasSetTextAction()).performTextInput("will fail")
+        compose.waitForIdle()
+        compose.onNodeWithText("Send").performClick()
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithText("HTTP 500").fetchSemanticsNodes().isNotEmpty()
+        }
+
+        // The next refresh succeeds, and the complaint has to go.
+        compose.onNode(hasScrollAction()).performTouchInput { swipeDown() }
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithText("HTTP 500").fetchSemanticsNodes().isEmpty()
+        }
     }
 
     @Test

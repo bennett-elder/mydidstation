@@ -423,7 +423,17 @@ class Sync(
                 // Drop it and let the next poll bring that one in.
                 store.deleteMessage(pendingId)
             }
-            refreshDid(did)
+            // The refresh below is a convenience: the row is already confirmed and the
+            // server already has the message. Letting its failure reach the catch would
+            // delete a message that was sent, put the draft back, and invite a second send
+            // that costs money. The next poll fills the thread in anyway.
+            try {
+                refreshDid(did)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Left to the next poll.
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

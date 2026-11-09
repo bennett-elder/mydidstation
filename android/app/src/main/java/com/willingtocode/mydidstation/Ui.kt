@@ -1522,6 +1522,11 @@ fun MessagesScreen(
         if (!refreshing) {
             scope.launch {
                 refreshing = true
+                // Cleared before the attempt, so a refresh that works answers whatever the last
+                // one complained about. A send that timed out on this side and landed on the
+                // other is exactly that case: the thread fills in and the complaint has to go
+                // with it, or the pane argues with the messages under it.
+                error = null
                 try {
                     container.sync.refreshDid(did)
                 } catch (e: Exception) {

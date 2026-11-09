@@ -77,6 +77,20 @@ class VoipMs(private val settings: ApiSettings) {
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
+    /**
+     * The client for one-off uploads, which is only the picture send.
+     *
+     * A 30 second read timeout and OkHttp's default 10 second write timeout are right for a
+     * poll and wrong for a megabyte of base64 that the server has to accept and hand to a
+     * carrier. Both fired on a real send on 2026-11-09 and the person saw one word: "timeout".
+     * Kept separate so a slow send does not become the timeout every poll is judged by.
+     */
+    private val uploadHttp = http.newBuilder()
+        .writeTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(120, TimeUnit.SECONDS)
+        .callTimeout(180, TimeUnit.SECONDS)
+        .build()
+
     private val stampFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).apply {
         timeZone = API_TZ
     }
@@ -85,6 +99,9 @@ class VoipMs(private val settings: ApiSettings) {
     }
 
     private suspend fun call(vararg params: Pair<String, String>): JSONObject =
+        call(http, *params)
+
+    private suspend fun call(client: OkHttpClient, vararg params: Pair<String, String>): JSONObject =
         withContext(Dispatchers.IO) {
             val creds = settings.credentials() ?: throw IllegalStateException("Not configured")
             val form = MultipartBody.Builder().setType(MultipartBody.FORM).apply {
@@ -93,7 +110,7 @@ class VoipMs(private val settings: ApiSettings) {
                 params.forEach { (k, v) -> addFormDataPart(k, v) }
             }.build()
             val request = Request.Builder().url(settings.endpoint()).post(form).build()
-            http.newCall(request).execute().use { response ->
+            client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
                 JSONObject(response.body.string())
             }
@@ -238,6 +255,7 @@ class VoipMs(private val settings: ApiSettings) {
      */
     suspend fun sendMms(did: String, destination: String, caption: String, jpeg: ByteArray): Long? {
         val json = call(
+            uploadHttp,
             "method" to "sendMMS",
             "did" to did,
             "dst" to destination,

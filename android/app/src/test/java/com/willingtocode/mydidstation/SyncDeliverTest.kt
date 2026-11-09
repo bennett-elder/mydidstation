@@ -183,6 +183,22 @@ class SyncDeliverTest {
     }
 
     @Test
+    fun `a failed refresh does not remove a picture that was sent`() = runBlocking {
+        // The send succeeded and the row was confirmed, then the follow-up refresh blew up.
+        // That must not delete the message: the server has it, and asking the person to send
+        // again would cost them a second MMS.
+        reply("""{"status":"success","mms":4245}""")
+        server.enqueue(MockResponse().setResponseCode(500))
+        val pendingId = pendingRow("sent and confirmed")
+
+        sync.deliverMms(did, them, "sent and confirmed", byteArrayOf(1), pendingId)
+
+        val row = rows().single()
+        assertFalse("the confirmed row was left pending", row.pending)
+        assertEquals("sent and confirmed", row.body)
+    }
+
+    @Test
     fun `a text still takes the same path and confirms`() = runBlocking {
         // The delivery body is shared now, so this is the guard that moving it did not change
         // what a text does.
