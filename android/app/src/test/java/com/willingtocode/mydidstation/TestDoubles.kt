@@ -3,6 +3,16 @@ package com.willingtocode.mydidstation
 import android.util.Base64
 
 /**
+ * How long a screen test waits for work that happens on other threads.
+ *
+ * These waits are real time, not test-clock time: a tap starts a coroutine that goes out to
+ * the network and comes back through `Dispatchers.IO`. Ten seconds was enough when a screen
+ * test ran alone and was not enough in a full-suite run, where Robolectric has already built
+ * sixteen sandboxes, so the budget is generous. It only costs anything when a test fails.
+ */
+internal const val PATIENCE_MS = 30_000L
+
+/**
  * A stand-in for the Keystore, for tests that need a whole `Container`.
  *
  * Robolectric has no `AndroidKeyStore` provider, so the real box cannot run on the JVM. This

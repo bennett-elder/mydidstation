@@ -113,7 +113,7 @@ class VoicemailScreenTest {
     private fun waitForRow(text: String) {
         // The rows arrive from a coroutine that goes out to the API, so the row has to be
         // waited for rather than assumed.
-        compose.waitUntil(timeoutMillis = 10_000) {
+        compose.waitUntil(timeoutMillis = PATIENCE_MS) {
             compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty()
         }
     }
@@ -152,7 +152,7 @@ class VoicemailScreenTest {
         // What a tap is supposed to start is a fetch of that recording. Playback is not
         // asserted: MediaPlayer is a shadow on the JVM, and the wiring is the thing that has
         // been missing before, not the decoder.
-        compose.waitUntil(timeoutMillis = 10_000) {
+        compose.waitUntil(timeoutMillis = PATIENCE_MS) {
             asked.contains("getVoicemailMessageFile")
         }
     }

@@ -122,7 +122,7 @@ class ScreenTapsTest {
     }
 
     private fun waitForText(text: String) {
-        compose.waitUntil(timeoutMillis = 10_000) {
+        compose.waitUntil(timeoutMillis = PATIENCE_MS) {
             compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty()
         }
     }
@@ -191,7 +191,7 @@ class ScreenTapsTest {
         compose.waitForIdle()
         compose.onNodeWithText("Send").performClick()
 
-        compose.waitUntil(timeoutMillis = 10_000) { asked.contains("sendSMS") }
+        compose.waitUntil(timeoutMillis = PATIENCE_MS) { asked.contains("sendSMS") }
     }
 
     @Test
@@ -208,7 +208,7 @@ class ScreenTapsTest {
         fields[1].performTextInput("secret")
         compose.onNodeWithText("Save and find numbers").performClick()
 
-        compose.waitUntil(timeoutMillis = 10_000) { container.settings.credentials() != null }
+        compose.waitUntil(timeoutMillis = PATIENCE_MS) { container.settings.credentials() != null }
         assertEquals("user@example.com" to "secret", container.settings.credentials())
     }
 }
