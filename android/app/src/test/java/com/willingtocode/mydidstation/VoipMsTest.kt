@@ -14,6 +14,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.util.Calendar
+import java.util.TimeZone
 
 /**
  * The API layer against recorded response bodies.
@@ -454,5 +456,60 @@ class VoipMsTest {
         assertTrue("mailbox missing from $body", body.contains("1001"))
         assertTrue("folder missing from $body", body.contains("INBOX"))
         assertTrue("listen flag missing from $body", body.contains("yes"))
+    }
+
+    /**
+     * An instant written on the API's own day boundary, which is a fixed GMT-5 rather than
+     * a city. The zone is named here instead of taken from the default, because a test that
+     * leaned on the machine's zone would pass in one place and fail in another.
+     */
+    private fun apiDay(year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int = 0): Long =
+        Calendar.getInstance(TimeZone.getTimeZone("GMT-5")).apply {
+            clear()
+            set(year, month - 1, day, hour, minute, second)
+        }.timeInMillis / 1000
+
+    @Test
+    fun `two instants on one API day describe one window`() {
+        // The sync layer narrows a range by halving it, and this is how it learns further
+        // narrowing is pointless: both ends are the same date on the wire.
+        val api = api()
+        val midnight = apiDay(2026, 11, 8, 0, 0)
+        val lastSecond = apiDay(2026, 11, 8, 23, 59, 59)
+        assertTrue(api.sameApiDay(midnight, lastSecond))
+        assertTrue(api.sameApiDay(lastSecond, midnight))
+        assertTrue(api.sameApiDay(midnight, midnight))
+    }
+
+    @Test
+    fun `one second past the API midnight is another day`() {
+        val api = api()
+        val lastSecond = apiDay(2026, 11, 8, 23, 59, 59)
+        val nextMidnight = apiDay(2026, 11, 9, 0, 0)
+        assertEquals(1L, nextMidnight - lastSecond)
+        assertFalse(api.sameApiDay(lastSecond, nextMidnight))
+    }
+
+    @Test
+    fun `the API day follows the fixed offset and not a city`() {
+        // 19:30 and 23:30 on 1 July in GMT-5 are 20:30 and 00:30 in New York, so a reader
+        // using America/New_York would call these two different days and disagree with the
+        // server about which window it was given. The timestamps already cost an hour to
+        // this same mistake.
+        val api = api()
+        val evening = apiDay(2026, 7, 1, 19, 30)
+        val lateEvening = apiDay(2026, 7, 1, 23, 30)
+        assertTrue(api.sameApiDay(evening, lateEvening))
+        assertFalse(api.sameApiDay(lateEvening, apiDay(2026, 7, 2, 0, 30)))
+    }
+
+    @Test
+    fun `the sendable range starts at a short code and ends at fifteen digits`() {
+        // Both ends are refusals people meet in the composer: a truncated paste, and a wall
+        // of digits. The middle is what has to keep working.
+        assertFalse("four digits is shorter than any short code", VoipMs.isSendable("2239"))
+        assertTrue("five digits is a short code", VoipMs.isSendable("22395"))
+        assertTrue("fifteen digits is the E.164 ceiling", VoipMs.isSendable("123456789012345"))
+        assertFalse("sixteen digits is past it", VoipMs.isSendable("1234567890123456"))
     }
 }

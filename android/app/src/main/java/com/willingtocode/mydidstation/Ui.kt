@@ -124,8 +124,8 @@ private const val STALE_PENDING_SECONDS = 15L * 60
  */
 private const val PULL_UP_TO_REFRESH = 96
 
-/** "12:34" style countdown to the next background poll. */
-private fun countdownText(nextAt: Long?, now: Long): String? {
+/** "12:34" style countdown to the next background poll. Internal so a test can reach it. */
+internal fun countdownText(nextAt: Long?, now: Long): String? {
     if (nextAt == null) return null
     val left = nextAt - now
     if (left <= 0) return "due now"
