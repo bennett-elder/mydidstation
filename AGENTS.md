@@ -26,6 +26,8 @@ scrolls away under tool output before it can be read.
   Full logs go to a file and stay there unless something needs reading.
 - **One turn, one question.** Asked for a plan, the plan is the answer and the turn ends. Act
   on "continue", not alongside "what are the options".
+- **Propose the commit message.** When a change looks ready to commit, say what the one-line
+  message would be, so approving it is one word rather than a drafting round.
 
 ## Permission
 
