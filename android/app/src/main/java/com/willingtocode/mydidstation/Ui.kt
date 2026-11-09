@@ -1479,6 +1479,9 @@ fun MessagesScreen(
     var picture by remember { mutableStateOf<ByteArray?>(null) }
     var pictureUri by remember { mutableStateOf<Uri?>(null) }
     var pictureNote by remember { mutableStateOf<String?>(null) }
+    // Whether the last refused send might nonetheless have reached the server. It decides the
+    // wording of the card and whether trying again needs asking first.
+    var errorIsUnknown by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
     val pickPicture = rememberLauncherForActivityResult(
@@ -1605,12 +1608,14 @@ fun MessagesScreen(
         if (!canSend || sending) return
         val jpeg = picture
         val pickedUri = pictureUri
+        val pickedNote = pictureNote
         val typed = draft.trim()
         val body = if (typed.isEmpty() && jpeg != null) " " else typed
         val toContact = sendableContact
         scope.launch {
             sending = true
             error = null
+            errorIsUnknown = false
             draft = ""
             resolvedContact = toContact
             val now = System.currentTimeMillis() / 1000
@@ -1636,8 +1641,17 @@ fun MessagesScreen(
                 pictureNote = null
             } catch (e: Exception) {
                 error = e.message ?: "send failed"
-                // Both come back so the retry is one tap, not a re-pick.
+                // A send that may have arrived has to say so. The row is gone either way, so
+                // without this the only evidence of the attempt is a line of error text, and
+                // tapping Send again could pay for the picture twice.
+                errorIsUnknown = SendFailure.verdict(e) == SendVerdict.UNKNOWN
+                // All of it comes back so the retry is one tap, not a re-pick. The picture has
+                // to return too: Remove is refused while a send is in flight now, but a
+                // failure must not depend on that to keep its own retry honest.
                 draft = typed
+                picture = jpeg
+                pictureUri = pickedUri
+                pictureNote = pickedNote
             } finally {
                 reload()
                 sending = false
@@ -1828,12 +1842,38 @@ fun MessagesScreen(
                 }
             }
 
-            error?.let {
-                Text(
-                    it,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                )
+            // What went wrong, in the two shapes that call for different things. A failure
+            // that cannot have reached the server offers a retry outright. One that might
+            // have reached it says so, and offers the check before the resend, because the
+            // pending row is already gone and a second send costs another message.
+            error?.let { message ->
+                Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                    Text(
+                        if (errorIsUnknown) {
+                            "No answer from the server  ·  it may have arrived"
+                        } else {
+                            "Not sent  ·  nothing left the phone"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Text(
+                        message,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(
+                            onClick = { send() },
+                            enabled = canSend && !sending,
+                        ) { Text(if (errorIsUnknown) "Send again" else "Retry") }
+                        if (errorIsUnknown) {
+                            TextButton(onClick = { refreshNow() }, enabled = !refreshing) {
+                                Text("Refresh")
+                            }
+                        }
+                    }
+                }
             }
 
             Column(Modifier.fillMaxWidth().padding(12.dp)) {
@@ -1850,7 +1890,13 @@ fun MessagesScreen(
                             style = MaterialTheme.typography.bodySmall,
                         )
                         if (picture != null) {
+                            // Refused while the send is in flight. The bytes were captured when
+                            // Send was tapped, so taking the picture back here cannot call it
+                            // off: it only makes the composer disagree with the request that is
+                            // already out, which is what a Remove tap during a send did on
+                            // 2026-11-09. Same rule as Photo.
                             TextButton(
+                                enabled = !sending,
                                 onClick = {
                                     picture = null
                                     pictureUri = null
@@ -1881,7 +1927,7 @@ fun MessagesScreen(
                         placeholder = { Text("Message") },
                         modifier = Modifier.weight(1f).heightIn(min = 56.dp),
                     )
-                    Button(onClick = { send() }, enabled = canSend) {
+                    Button(onClick = { send() }, enabled = canSend && !sending) {
                         if (sending) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(16.dp),

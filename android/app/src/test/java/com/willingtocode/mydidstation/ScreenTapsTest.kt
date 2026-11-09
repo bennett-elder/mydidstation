@@ -3,6 +3,7 @@ package com.willingtocode.mydidstation
 import android.app.Application
 import android.content.Context
 import android.net.Uri
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasScrollAction
@@ -55,8 +56,9 @@ class ScreenTapsTest {
 
     private val asked = CopyOnWriteArrayList<String>()
 
-    /** When true, the next sendSMS is refused and the switch resets itself. */
+    /** When true, the next sendSMS is refused with [failNextSendWith] and the switch resets. */
     private var failNextSend = false
+    private var failNextSendWith = 500
     private val methods = listOf("getDIDsInfo", "getMMS", "getSMS", "sendSMS", "getVoicemails")
 
     private val did = "5551234567"
@@ -78,7 +80,7 @@ class ScreenTapsTest {
                 return when {
                     form.contains("sendSMS") && failNextSend -> {
                         failNextSend = false
-                        MockResponse().setResponseCode(500)
+                        MockResponse().setResponseCode(failNextSendWith)
                     }
 
                     form.contains("sendSMS") ->
@@ -420,4 +422,72 @@ class ScreenTapsTest {
         assertEquals("user@example.com" to "secret", container.settings.credentials())
     }
 
+    @Test
+    fun `a send that may have arrived is reported as maybe, with the check offered`() {
+        // The measured case behind this: a 503 next to the send button while the picture had
+        // in fact been delivered. Offering a plain retry there is how a message gets sent and
+        // paid for twice, so the wording has to be the cautious one and Refresh has to be
+        // reachable without waiting for the next poll.
+        val container = configured()
+        val convId = seedConversation(container)
+        failNextSend = true
+        failNextSendWith = 503
+
+        compose.setContent {
+            MyDidStationTheme {
+                MessagesScreen(
+                    container = container,
+                    did = did,
+                    conversationId = convId,
+                    contact = them,
+                    onBack = {},
+                )
+            }
+        }
+
+        compose.onNode(hasSetTextAction()).performTextInput("may have gone")
+        compose.waitForIdle()
+        compose.onNodeWithText("Send").performClick()
+
+        compose.waitUntil(timeoutMillis = PATIENCE_MS) {
+            compose.onAllNodesWithText("No answer from the server", substring = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText("Send again").assertExists()
+        compose.onNodeWithText("Refresh").assertExists()
+        compose.onAllNodesWithText("Retry").assertCountEquals(0)
+    }
+
+    @Test
+    fun `a send refused for a reason offers a plain retry`() {
+        // 401 is decided before the message is looked at, so nothing exists to duplicate and
+        // the card can be definite about it.
+        val container = configured()
+        val convId = seedConversation(container)
+        failNextSend = true
+        failNextSendWith = 401
+
+        compose.setContent {
+            MyDidStationTheme {
+                MessagesScreen(
+                    container = container,
+                    did = did,
+                    conversationId = convId,
+                    contact = them,
+                    onBack = {},
+                )
+            }
+        }
+
+        compose.onNode(hasSetTextAction()).performTextInput("will be refused")
+        compose.waitForIdle()
+        compose.onNodeWithText("Send").performClick()
+
+        compose.waitUntil(timeoutMillis = PATIENCE_MS) {
+            compose.onAllNodesWithText("Not sent", substring = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText("Retry").assertExists()
+        compose.onAllNodesWithText("Send again").assertCountEquals(0)
+    }
 }
