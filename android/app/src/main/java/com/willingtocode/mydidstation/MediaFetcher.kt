@@ -245,7 +245,35 @@ class MediaFetcher(
                 if (target.renameTo(voice)) return MediaResult.Loaded(voice, spoken)
             }
         }
+        // A picture that claims more pixels than any phone should allocate is refused here,
+        // before the decoder is handed the file. The download cap bounds the bytes and says
+        // nothing about the bitmap they expand to.
+        tooManyPixels(type, target)?.let { reason ->
+            target.delete()
+            return MediaResult.Failed(reason)
+        }
         return MediaResult.Loaded(target, type)
+    }
+
+    /**
+     * Reads the size a picture declares, and decides whether to refuse it.
+     *
+     * Null means "let the decoder decide", which covers every format whose header this does
+     * not parse and every header that does not parse cleanly. The budget is generous on
+     * purpose: a camera photo at 12 megapixels and a carrier-recompressed MMS image both pass,
+     * and what it stops is the shape that exists only to be large.
+     */
+    private fun tooManyPixels(type: MediaType, file: File): String? {
+        val head = ByteArray(HEADER_BYTES)
+        val read = try {
+            file.inputStream().use { readUpTo(it, head) }
+        } catch (e: IOException) {
+            return null
+        }
+        val pixels = ImageHeader.pixels(type, head, read) ?: return null
+        if (pixels <= MAX_DECODED_PIXELS) return null
+        val millions = (pixels / 1_000_000).coerceAtLeast(1)
+        return "picture too large (it declares $millions megapixels)"
     }
 
     /**
@@ -398,16 +426,35 @@ class MediaFetcher(
         private const val SNIFF_BYTES = 16
 
         /**
+         * How much of a stored picture is read back to find its declared size.
+         *
+         * A PNG states it at byte 16 and a JPEG's frame header is within the first few hundred
+         * bytes of any file an encoder produced, so this is far more than enough. It is a read
+         * of a file already on disk and bounded by [MAX_BYTES].
+         */
+        private const val HEADER_BYTES = 64 * 1024
+
+        /**
          * One attachment's ceiling.
          *
          * The vendor's own limit is 1.2 MB per file (`voipms-api.md`, the sendMMS section), so
          * anything past that is not a real MMS leaving a carrier intact — it is a provider
          * anomaly or a payload aimed at the phone. 2 MB accepts everything legitimate with
-         * headroom and refuses the rest. Note this caps the *file*, not the decoded bitmap: a
-         * small file can still decode huge, which is why the decoder is given a target size
-         * rather than trusted.
+         * headroom and refuses the rest. This caps the *file*: see [MAX_DECODED_PIXELS] for
+         * the bitmap it can expand to.
          */
         const val MAX_BYTES = 2L * 1024 * 1024
+
+        /**
+         * The most pixels a downloaded picture may declare before it is refused.
+         *
+         * Every byte here arrives from whoever has the number, so the file is treated as
+         * hostile. A 2 MB PNG can declare a gigapixel and the decoder would try to allocate
+         * it; this refuses that at the header. 24 megapixels is above any camera photo and far
+         * above what a carrier lets through, so the refusal only ever catches the shape that
+         * exists to be large.
+         */
+        const val MAX_DECODED_PIXELS = 24_000_000L
 
         /** What all the cached attachments may occupy together. */
         const val MAX_CACHE_BYTES = 64L * 1024 * 1024

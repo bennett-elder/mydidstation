@@ -11,9 +11,11 @@ import okio.Buffer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.file.Files
 
@@ -50,6 +52,96 @@ class MediaFetcherTest {
     private fun fetcher() = MediaFetcher(OkHttpClient(), root)
 
     private fun url(path: String) = server.url(path).toString()
+
+    /** A PNG header, complete enough to describe its own size. */
+    private fun pngHeader(width: Int, height: Int): ByteArray {
+        val out = ByteArrayOutputStream()
+        out.write(byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
+        out.write(byteArrayOf(0x00, 0x00, 0x00, 0x0D))
+        out.write("IHDR".toByteArray())
+        out.write(int32(width))
+        out.write(int32(height))
+        // Bit depth, colour type, compression, filter, interlace. Not read here.
+        out.write(byteArrayOf(8, 6, 0, 0, 0))
+        return out.toByteArray()
+    }
+
+    /** A JPEG header with an APP0 segment in front of the frame, as encoders write it. */
+    private fun jpegHeader(width: Int, height: Int): ByteArray {
+        val out = ByteArrayOutputStream()
+        out.write(byteArrayOf(0xFF.toByte(), 0xD8.toByte())) // SOI
+        out.write(byteArrayOf(0xFF.toByte(), 0xE0.toByte(), 0x00, 0x10))
+        out.write(ByteArray(14))
+        out.write(byteArrayOf(0xFF.toByte(), 0xC0.toByte(), 0x00, 0x11, 0x08))
+        out.write(byteArrayOf((height ushr 8).toByte(), height.toByte()))
+        out.write(byteArrayOf((width ushr 8).toByte(), width.toByte()))
+        out.write(byteArrayOf(0x03))
+        out.write(ByteArray(9))
+        return out.toByteArray()
+    }
+
+    private fun int32(value: Int) = byteArrayOf(
+        (value ushr 24).toByte(),
+        (value ushr 16).toByte(),
+        (value ushr 8).toByte(),
+        value.toByte(),
+    )
+
+    @Test
+    fun `a picture that declares a gigapixel is refused before it is decoded`() = runBlocking {
+        // The file is tiny and entirely legal. What makes it hostile is the size it claims,
+        // and the only defence that works is refusing the claim rather than decoding and hoping
+        // the decoder downsamples.
+        val huge = pngHeader(60_000, 60_000)
+        server.enqueue(MockResponse().setBody(Buffer().write(huge)))
+
+        val result = fetcher().fetch(url("/huge.png"))
+
+        assertTrue("expected a refusal, got $result", result is MediaResult.Failed)
+        assertTrue(
+            "the reason should say why: ${(result as MediaResult.Failed).reason}",
+            result.reason.contains("too large"),
+        )
+        assertEquals("nothing was left behind", 0, fetcher().count())
+    }
+
+    @Test
+    fun `an ordinary photo is still stored`() = runBlocking {
+        // The guard has to leave real pictures alone: a phone camera and a carrier-recompressed
+        // MMS image both land under the budget.
+        server.enqueue(MockResponse().setBody(Buffer().write(pngHeader(4_032, 3_024))))
+        val result = fetcher().fetch(url("/photo.png"))
+        assertTrue("a real photograph must pass, got $result", result is MediaResult.Loaded)
+    }
+
+    @Test
+    fun `the size a png declares is read from its header`() {
+        val header = pngHeader(1_200, 800)
+        assertEquals(1_200L * 800L, ImageHeader.pixels(MediaType.Png, header, header.size))
+    }
+
+    @Test
+    fun `the size a jpeg declares is found past the segments in front of it`() {
+        val header = jpegHeader(4_032, 3_024)
+        assertEquals(4_032L * 3_024L, ImageHeader.pixels(MediaType.Jpeg, header, header.size))
+    }
+
+    @Test
+    fun `a header that does not say returns nothing rather than a guess`() {
+        val png = pngHeader(10, 10)
+        assertNull("a truncated png says nothing", ImageHeader.pixels(MediaType.Png, png, 20))
+
+        // A JPEG that reaches its scan data without a frame header never says how big it is.
+        val scanOnly = byteArrayOf(
+            0xFF.toByte(), 0xD8.toByte(),
+            0xFF.toByte(), 0xDA.toByte(),
+            0x00, 0x08, 0, 0, 0, 0, 0, 0,
+        )
+        assertNull(ImageHeader.pixels(MediaType.Jpeg, scanOnly, scanOnly.size))
+
+        // Formats this does not parse are left to the decoder, which is how it worked before.
+        assertNull(ImageHeader.pixels(MediaType.Gif, png, png.size))
+    }
 
     @Test
     fun `a png is stored and identified from its bytes`() = runBlocking {
