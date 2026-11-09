@@ -2,7 +2,6 @@ package com.willingtocode.mydidstation
 
 import android.app.Application
 import android.content.Context
-import android.util.Base64
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
@@ -50,17 +49,6 @@ class VoicemailScreenTest {
         "getVoicemailMessages",
         "getVoicemailMessageFile",
     )
-
-    /** Robolectric has no AndroidKeyStore, so this is opaque to a grep and nothing more. */
-    private class OpaqueBox : SecretBox {
-        override fun seal(purpose: String, plain: String): String =
-            Base64.encodeToString(plain.toByteArray(), Base64.NO_WRAP)
-
-        override fun open(purpose: String, sealed: String): Unsealed {
-            val plain = runCatching { String(Base64.decode(sealed, Base64.NO_WRAP)) }.getOrNull()
-            return if (plain == null) Unsealed.Unreadable else Unsealed.Ok(plain)
-        }
-    }
 
     @Before
     fun start() {
