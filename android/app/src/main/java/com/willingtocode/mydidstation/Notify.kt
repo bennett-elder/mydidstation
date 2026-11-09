@@ -25,6 +25,19 @@ fun interface Notifier {
      * because that is what the vendor reports and what the row will show.
      */
     fun newVoicemail(mailbox: String, name: String, count: Int) {}
+
+    /**
+     * Creates the notification channels, and withdraws a notification that has been read.
+     *
+     * Both are defaulted to nothing so a fake stays a one-line lambda. They are here rather
+     * than only on [AndroidNotifier] because the screens and the app start call them through
+     * this interface, and a seam that cannot be stood in for is not a seam.
+     */
+    fun ensureChannel() {}
+
+    fun cancel(did: String, contact: String) {}
+
+    fun cancel(mailbox: String) {}
 }
 
 /**
@@ -58,7 +71,7 @@ class AndroidNotifier(private val context: Context) : Notifier {
     private val manager = NotificationManagerCompat.from(context)
 
     /** Idempotent, so it is safe to call on every app start. */
-    fun ensureChannel() {
+    override fun ensureChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val channel = NotificationChannel(
             CHANNEL_ID,
@@ -180,12 +193,12 @@ class AndroidNotifier(private val context: Context) : Notifier {
     }
 
     /** Called when a thread is read, because its notification has nothing left to say. */
-    fun cancel(did: String, contact: String) {
+    override fun cancel(did: String, contact: String) {
         manager.cancel(id(did, contact))
     }
 
     /** Same, for a mailbox that has just been opened. */
-    fun cancel(mailbox: String) {
+    override fun cancel(mailbox: String) {
         manager.cancel(voicemailId(mailbox))
     }
 

@@ -24,14 +24,21 @@ class App : Application() {
     }
 }
 
-class Container(private val context: Context) {
+class Container(
+    private val context: Context,
+    // The two things a JVM cannot supply. Robolectric has no AndroidKeyStore provider, so the
+    // real box cannot run in a test, and a real notifier posts to the system. The API needs no
+    // seam: it is reached through Settings.endpoint(), which a test points at a MockWebServer.
+    box: SecretBox = KeystoreBox(),
+    private val notifierOverride: Notifier? = null,
+) {
     // Lazy so that starting the app touches no database, no network and no Keystore.
     // A launch must survive a broken Keystore, and the tests have to be able to build a
     // container on a JVM with no AndroidKeyStore provider at all.
-    val settings by lazy { Settings(context) }
+    val settings by lazy { Settings(context, box) }
     val store by lazy { Store(context) }
     val api by lazy { VoipMs(settings) }
-    val notifier by lazy { AndroidNotifier(context) }
+    val notifier by lazy { notifierOverride ?: AndroidNotifier(context) }
     val sync by lazy { Sync(store, api, notifier) }
 
     /** Downloaded audio, in the cache directory the OS may empty whenever it likes. */
