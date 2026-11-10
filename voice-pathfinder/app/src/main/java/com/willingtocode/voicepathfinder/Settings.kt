@@ -110,6 +110,30 @@ class PathfinderSettings(
     override fun endpoint(): String =
         prefs.getString(KEY_ENDPOINT, null)?.takeIf { it.isNotBlank() } ?: DEFAULT_ENDPOINT
 
+    /**
+     * Points the app at the mock on this machine. Debug builds only, and it says so on
+     * screen: a mock session that looks like a real one is how a test result gets mistaken
+     * for a real one.
+     *
+     * Everything moves together, because a half-pointed app is the confusing state. The
+     * mock speaks plain HTTP and has no SIP stack, so TLS is off and the port is 5060.
+     */
+    var useMock: Boolean
+        get() = prefs.getBoolean(KEY_MOCK, false)
+        set(value) {
+            prefs.edit().putBoolean(KEY_MOCK, value).apply()
+            if (value) {
+                setEndpoint(MOCK_ENDPOINT)
+                serverOverride = MOCK_SIP_HOST
+                useTls = false
+                serverPort = 5060
+            } else {
+                setEndpoint(DEFAULT_ENDPOINT)
+                serverOverride = ""
+                serverPort = 0
+            }
+        }
+
     fun setEndpoint(url: String) {
         val trimmed = url.trim()
         if (trimmed.isEmpty() || trimmed == DEFAULT_ENDPOINT) {
@@ -245,7 +269,12 @@ class PathfinderSettings(
         const val KEY_CALLS_CHECKED_AT = "calls_checked_at"
         const val KEY_DID_CACHE = "did_cache"
         const val KEY_CONFIRMED = "numbers_confirmed"
+        const val KEY_MOCK = "use_mock"
 
         const val DEFAULT_ENDPOINT = "https://voip.ms/api/v1/rest.php"
+
+        /** 10.0.2.2 is the emulator's alias for the machine running the mock. */
+        const val MOCK_ENDPOINT = "http://10.0.2.2:8765/rest.php"
+        const val MOCK_SIP_HOST = "10.0.2.2"
     }
 }

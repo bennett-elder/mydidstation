@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug-only overrides. The release manifest keeps the platform's cleartext policy, which
+  refuses plain HTTP to every host.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application android:networkSecurityConfig="@xml/network_security_config" />
+</manifest>

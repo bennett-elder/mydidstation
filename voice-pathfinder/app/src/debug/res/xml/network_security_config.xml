@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug builds only.
+
+  The mock on this machine speaks plain HTTP, and the emulator reaches the machine at
+  10.0.2.2. That one host is named rather than switching cleartext on everywhere, so a
+  release build and every other host still require TLS.
+
+  localhost is deliberately absent. On Android it is the device itself, not this machine,
+  so allowing it would permit cleartext to a server inside the emulator. The only thing it
+  would buy is `adb reverse tcp:8765 tcp:8765` for a phone over USB, which this project
+  does not use. A phone test needs this machine's LAN address added here by hand.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">10.0.2.2</domain>
+    </domain-config>
+</network-security-config>

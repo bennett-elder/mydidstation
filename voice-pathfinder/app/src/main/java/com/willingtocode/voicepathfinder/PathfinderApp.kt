@@ -5,10 +5,19 @@ import android.app.Application
 /**
  * The process-wide holder.
  *
- * A foreground service is what the product needs and what Phase 0 explicitly does not
- * build. Until then this is the reason a rotation does not drop a live call: the
- * controller outlives the activity, and the activity only renders it.
+ * The controller outlives the activity, so a rotation does not drop a live call, and the
+ * foreground service in [PathfinderService] reads the same instance rather than owning a
+ * second copy of the engine.
  */
 class PathfinderApp : Application() {
+
     val pathfinder: Pathfinder by lazy { Pathfinder(this) }
+
+    override fun onCreate() {
+        super.onCreate()
+        // On every start, which is harmless: the platform replaces the record for the same
+        // handle. Doing it here rather than on first use means a call can find a registered
+        // account even when nobody has opened a screen yet.
+        TelecomBridge.register(this)
+    }
 }

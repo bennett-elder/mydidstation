@@ -19,6 +19,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 /**
@@ -55,7 +56,7 @@ class PathfinderService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        val notification = build(pathfinder.state.value)
+        val notification = build(pathfinder.callState.value ?: pathfinder.state.value)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
                 NOTIFICATION_ID,
@@ -94,10 +95,15 @@ class PathfinderService : Service() {
     private fun watch() {
         watching?.cancel()
         watching = scope.launch {
-            pathfinder.state.collectLatest { state ->
-                (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
-                    .notify(NOTIFICATION_ID, build(state))
-            }
+            // Two flows, one line: the registration says whether this phone answers, and the
+            // call says what it is doing. Registration alone would leave the notification
+            // claiming to be idle during a call, which is what happened when they shared a flow
+            // and then stopped being one.
+            combine(pathfinder.state, pathfinder.callState) { registered, call -> call ?: registered }
+                .collectLatest { state ->
+                    (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+                        .notify(NOTIFICATION_ID, build(state))
+                }
         }
     }
 

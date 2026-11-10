@@ -89,6 +89,144 @@ DIDS = [
         "sms_available": "0",
         "sms_enabled": "0",
     },
+    {
+        "did": "5551112222",
+        "description": "Mock second line",
+        # A second sub-account so the multi-line path is exercisable: one registration
+        # per sub-account is the behaviour worth modelling.
+        "routing": "account:100002_VoIP",
+        "voicemail": "1001",
+        "dialtime": "60",
+        "pop": "16",
+        "billing_type": "2",
+        "cnam": "0",
+        "sms_available": "0",
+        "sms_enabled": "0",
+    },
+    {
+        "did": "5550009999",
+        "description": "Mock straight to voicemail",
+        # Not routable to a phone, which the app must show but refuse to select.
+        "routing": "voicemail:1001",
+        "voicemail": "1001",
+        "pop": "16",
+        "billing_type": "2",
+        "cnam": "0",
+        "sms_available": "0",
+        "sms_enabled": "0",
+    },
+]
+
+# Sub-accounts, as getSubAccounts reports them. Two of them on purpose: the app keeps
+# one registration per sub-account, so a single sub-account cannot test that.
+SUBS = [
+    {
+        "id": "100001",
+        "account": "100001_VoIP",
+        "description": "Mock line",
+        "password": "mockpass1",
+        "auth_type": "user",
+        "device_type": "IP",
+        "callerid_number": "5551234567",
+        "lock_international": "0",
+        "international_route": "1",
+        "canada_routing": "2",
+        "music_on_hold": "",
+        "allowed_codecs": "ulaw;g722",
+        "dtmf_mode": "auto",
+        "nat": "yes",
+        "rtp_timeout": "300",
+        "rtp_hold_timeout": "600",
+        # encryption off, because tools/mock_sip.py speaks plain RTP. A fixture claiming
+        # encryption on would only prove the mock agrees with itself.
+        "sip_traffic": "0",
+        "max_expiry": "3600",
+        "protocol": "1",
+        "dialing_mode": "1",
+    },
+    {
+        "id": "100002",
+        "account": "100002_VoIP",
+        "description": "Mock line two",
+        "password": "mockpass2",
+        "auth_type": "user",
+        "device_type": "IP",
+        "callerid_number": "5559876543",
+        "lock_international": "0",
+        "international_route": "1",
+        "canada_routing": "2",
+        "music_on_hold": "",
+        "allowed_codecs": "ulaw",
+        "dtmf_mode": "auto",
+        "nat": "yes",
+        "rtp_timeout": "300",
+        "rtp_hold_timeout": "600",
+        "sip_traffic": "0",
+        "max_expiry": "3600",
+        "protocol": "1",
+        "dialing_mode": "1",
+    },
+]
+
+# One POP, recommended, pointing at this machine. 10.0.2.2 is the emulator's alias for the
+# host, so a registration attempt reaches whatever is listening here rather than the vendor.
+SERVERS = [
+    {
+        "server_name": "Mock POP 1",
+        "server_hostname": "10.0.2.2",
+        "server_pop": "1",
+        "server_recommended": "yes",
+    },
+]
+
+# Registration is not something the REST side can do; this is what the app is told when it
+# asks. /control/register sets it so the registered state can be exercised.
+REGISTRATIONS = {}
+
+# Call records. The first pair shares a timestamp and duration because the provider records
+# one leg per side of a call, which is what the app folds into a single row.
+CALLS = [
+    {
+        "date": "2026-11-10 09:41:12",
+        "destination": "5551234567",
+        "disposition": "answered",
+        "description": "Outbound - Customer",
+        "seconds": "42",
+        "call_logs": "",
+        "account": "100001_VoIP",
+        "callerid": "5551234567",
+    },
+    {
+        "date": "2026-11-10 09:41:12",
+        "destination": "15551110001",
+        "disposition": "answered",
+        "description": "Inbound - Local Caller",
+        "seconds": "42",
+        "call_logs": "",
+        "account": "100001_VoIP",
+        # A display name around the number, which the app has to reduce to digits.
+        "callerid": "\"Mock Caller\" <15551110001>",
+    },
+    {
+        "date": "2026-11-10 08:20:05",
+        "destination": "5551112222",
+        "disposition": "noanswer",
+        "description": "Inbound - Local Caller",
+        "seconds": "0",
+        "call_logs": "Routing to voicemail",
+        "account": "100002_VoIP",
+        "callerid": "15551110002",
+    },
+    {
+        "date": "2026-11-09 16:03:44",
+        "destination": "15551110003",
+        "disposition": "busy",
+        "description": "Outbound - Customer",
+        "seconds": "0",
+        "call_logs": "Channel not available",
+        "account": "100001_VoIP",
+        "callerid": "5551234567",
+    },
 ]
 
 # Voicemail mailboxes. Two relationships matter and both are modelled here: mailbox 1001
@@ -506,6 +644,23 @@ class Handler(BaseHTTPRequestHandler):
                 STATE["strip_list_bodies"] = fields.get("on", "1") not in ("0", "no", "false")
             self.log_api(f"control: strip_list_bodies={STATE['strip_list_bodies']}")
             return self.send_json({"strip_list_bodies": STATE["strip_list_bodies"]})
+        if route == "/control/register":
+            account = fields.get("account", SUBS[0]["account"])
+            with LOCK:
+                if fields.get("off") in ("1", "yes", "true"):
+                    REGISTRATIONS.pop(account, None)
+                    self.log_api(f"control: {account} unregistered")
+                    return self.send_json({"registered": "no"})
+                REGISTRATIONS[account] = {
+                    "account": account,
+                    "server_hostname": fields.get("server_hostname", "10.0.2.2"),
+                    "register_transport": fields.get("transport", "TLS"),
+                    "register_ip": fields.get("ip", "192.0.2.10"),
+                    "register_port": fields.get("port", "5061"),
+                }
+                now = dict(REGISTRATIONS[account])
+            self.log_api(f"control: {account} registered {now['register_transport']}")
+            return self.send_json({"registered": "yes", "registrations": [now]})
         if route == "/control/reset":
             with LOCK:
                 STATE["fail_code"] = 0
@@ -786,6 +941,62 @@ class Handler(BaseHTTPRequestHandler):
                 "folder": v["folder"],
                 "result": v["transcript"],
             } for v in rows]})
+
+        if method == "getSubAccounts":
+            with LOCK:
+                rows = [dict(one) for one in SUBS]
+            self.log_api(f"sub-accounts -> {len(rows)}")
+            return self.send_json({"status": "success", "accounts": rows})
+
+        if method == "getServersInfo":
+            self.log_api("servers")
+            return self.send_json({"status": "success", "servers": SERVERS})
+
+        if method == "getRegistrationStatus":
+            account = fields.get("account", "")
+            with LOCK:
+                row = REGISTRATIONS.get(account)
+            if not row:
+                self.log_api(f"registration status {account} -> not registered")
+                return self.send_json({"status": "success", "registered": "no",
+                                       "registrations": []})
+            self.log_api(f"registration status {account} -> {row['register_transport']}")
+            return self.send_json({"status": "success", "registered": "yes",
+                                   "registrations": [dict(row)]})
+
+        if method == "setSubAccount":
+            wanted = fields.get("id", "")
+            with LOCK:
+                target = next((one for one in SUBS if one["id"] == wanted), None)
+                if target is None:
+                    self.log_api(f"setSubAccount id={wanted} -> not found")
+                    return self.send_json({"status": "invalid_sub_account"})
+                # Only what the app is allowed to change, so a field it forgets to send
+                # keeps its value here exactly as it does at the provider.
+                for key in ("allowed_codecs", "sip_traffic", "max_expiry",
+                            "callerid_number", "description", "canada_routing",
+                            "international_route", "dtmf_mode"):
+                    if key in fields:
+                        target[key] = fields[key]
+                kept = dict(target)
+            self.log_api(f"setSubAccount {kept['account']} codecs={kept['allowed_codecs']} "
+                         f"encrypted={kept['sip_traffic']} expiry={kept['max_expiry']}")
+            return self.send_json({"status": "success"})
+
+        if method == "getCDR":
+            date_from = fields.get("date_from", "0000-00-00")
+            date_to = fields.get("date_to", "9999-99-99")
+            account = fields.get("account", "")
+            wanted = [name for name in ("answered", "noanswer", "busy", "failed")
+                      if fields.get(name) in ("1", "yes", "true")]
+            rows = [one for one in CALLS if date_from <= one["date"][:10] <= date_to]
+            if account:
+                rows = [one for one in rows if one.get("account") == account]
+            if wanted:
+                rows = [one for one in rows if one.get("disposition") in wanted]
+            self.log_api(f"getCDR {date_from}..{date_to} account={account or 'any'} "
+                         f"-> {len(rows)} row(s)")
+            return self.send_json({"status": "success", "cdr": rows})
 
         self.log_api(f"{method}: unknown method")
         return self.send_json({"status": "invalid_method"})

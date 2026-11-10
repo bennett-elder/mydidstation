@@ -36,6 +36,8 @@ dependencies {
     implementation(platform("androidx.compose:compose-bom:2026.09.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
+    // The same icon set the main app uses for its navigation bar.
+    implementation("androidx.compose.material:material-icons-core")
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.core:core-ktx:1.19.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")

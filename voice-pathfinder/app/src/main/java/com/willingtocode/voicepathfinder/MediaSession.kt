@@ -376,7 +376,8 @@ internal class MediaSession(
             val parsed = Rtp.parse(clear) ?: continue
             if (parsed.payloadType != G711.PAYLOAD_TYPE) continue
             if (framesReceived.get() == 0L) {
-                note("first media packet decrypted (${parsed.payload.size} bytes, seq ${parsed.sequence})")
+                val verb = if (context == null) "received" else "decrypted"
+                note("first media packet $verb (${parsed.payload.size} bytes, seq ${parsed.sequence})")
             }
             framesReceived.incrementAndGet()
             jitter.put(parsed.sequence, parsed.payload)

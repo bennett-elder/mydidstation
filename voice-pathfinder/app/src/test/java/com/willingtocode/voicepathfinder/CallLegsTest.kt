@@ -46,13 +46,31 @@ class CallLegsTest {
     }
 
     @Test
-    fun `an inbound only call keeps its own number`() {
+    fun `an inbound call with no caller id shows nothing rather than our own number`() {
         val rows = collapseLegs(
             listOf(leg("2026-11-09 16:36:58", "15551234567", "Inbound - Local Caller", 7)),
         )
         assertEquals(1, rows.size)
         assertEquals("Inbound", rows.first().direction)
-        assertEquals("5551234567", rows.first().destination)
+        // The destination of an inbound call is our own number, so borrowing it would name a
+        // caller who never called. Unknown stays unknown, and the row says so in words.
+        assertEquals("", rows.first().destination)
+    }
+
+    @Test
+    fun `an inbound call names the caller when the record has one`() {
+        val rows = collapseLegs(
+            listOf(
+                leg(
+                    "2026-11-09 16:36:58",
+                    "15551234567",
+                    "Inbound - Local Caller",
+                    7,
+                    callerId = "\"Someone\" <15559876543>",
+                ),
+            ),
+        )
+        assertEquals("5559876543", rows.first().destination)
     }
 
     @Test

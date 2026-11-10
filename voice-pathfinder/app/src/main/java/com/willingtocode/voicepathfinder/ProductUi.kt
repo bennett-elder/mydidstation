@@ -13,12 +13,26 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Card
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.ExposedDropdownMenuBox
@@ -33,12 +47,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
-import androidx.compose.material3.Tab
-import androidx.compose.material3.PrimaryTabRow
-import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -47,12 +57,24 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import android.content.pm.ApplicationInfo
 import androidx.compose.ui.Modifier
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import java.text.SimpleDateFormat
 import kotlinx.coroutines.delay
@@ -60,10 +82,9 @@ import java.util.Date
 import java.util.Locale
 
 /** The two places the app has. Numbers is setup, not a destination. */
-private enum class Page(val label: String) {
-    Dial("Dial"),
-    Calls("Calls"),
-    Settings("Settings"),
+private enum class Page(val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector) {
+    Calls("Calls", androidx.compose.material.icons.Icons.Filled.Call),
+    Settings("Settings", androidx.compose.material.icons.Icons.Filled.Settings),
 }
 
 /**
@@ -77,7 +98,7 @@ private enum class Page(val label: String) {
 @Composable
 internal fun ProductRoot(pathfinder: Pathfinder) {
     var hasCredentials by remember { mutableStateOf(pathfinder.apiSettings.credentials() != null) }
-    var page by remember { mutableStateOf(Page.Dial) }
+    var page by remember { mutableStateOf(Page.Calls) }
     // What the dialer is holding, kept here so a history row can prefill it.
     var dialNumber by remember { mutableStateOf(pathfinder.apiSettings.lastNumber) }
     var dialDid by remember { mutableStateOf<String?>(null) }
@@ -93,23 +114,60 @@ internal fun ProductRoot(pathfinder: Pathfinder) {
         }
     }
 
+    // The dialer is a dialog over the call list rather than a tab: dialling is something you
+    // do to the list, not a place you live. The shell it leaves behind is also the shape this
+    // needs when it moves into the main app, where voice will not get a tab of its own.
+    var dialOpen by remember { mutableStateOf(false) }
+    val call by pathfinder.callState.collectAsState()
+    val live = call
+    val dids by pathfinder.dids.collectAsState()
+    val fetching by pathfinder.fetching.collectAsState()
+    val starting by pathfinder.starting.collectAsState()
+    val readiness by pathfinder.readiness.collectAsState()
+    val muted by pathfinder.muted.collectAsState()
+    val stats by pathfinder.stats.collectAsState()
+    val provision by pathfinder.provision.collectAsState()
+
     Surface(modifier = Modifier.fillMaxSize()) {
         when {
             !hasCredentials -> ConnectPage(pathfinder) { hasCredentials = true }
             !confirmed -> OnboardingScreen(pathfinder) { confirmed = true }
+            // A call in progress takes the whole screen: there is nothing to navigate to
+            // while it is up, and the call is the most important thing on the device.
+            live is PathState.Dialing || live is PathState.Ringing ||
+                live is PathState.Connected -> CallScreen(
+                number = dialNumber,
+                state = live,
+                muted = muted,
+                stats = stats,
+                onMuted = { pathfinder.setMuted(it) },
+                onSpeaker = { pathfinder.setSpeaker(it) },
+                onHangUp = { pathfinder.hangUp() },
+                onKey = { pathfinder.sendDtmf(it) },
+            )
             else -> Scaffold(
-                topBar = {
-                    Column {
-                        TopAppBar(title = { Text("Voice") })
-                        PrimaryTabRow(selectedTabIndex = page.ordinal) {
-                            for (option in Page.entries) {
-                                Tab(
-                                    selected = option == page,
-                                    onClick = { page = option },
-                                    text = { Text(option.label) },
-
-                                )
-                            }
+                bottomBar = {
+                    // Bottom navigation with icons and labels, the same shape as the main
+                    // app's bar, so the two read as one family rather than two products.
+                    NavigationBar {
+                        for (option in Page.entries) {
+                            NavigationBarItem(
+                                selected = option == page,
+                                onClick = { page = option },
+                                icon = { Icon(option.icon, contentDescription = null) },
+                                label = { Text(option.label) },
+                            )
+                        }
+                    }
+                },
+                floatingActionButton = {
+                    // Beside the list, where a phone app puts it, and only on the list.
+                    if (page == Page.Calls) {
+                        FloatingActionButton(onClick = { dialOpen = true }) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_dialpad),
+                                contentDescription = "Dial",
+                            )
                         }
                     }
                 },
@@ -118,25 +176,27 @@ internal fun ProductRoot(pathfinder: Pathfinder) {
                     modifier = Modifier
                         .padding(inner)
                         .fillMaxSize()
-                        .verticalScroll(rememberScrollState())
+                        // The calls list scrolls itself, because it has two ends that refresh.
+                        // Settings keeps the page scroll; nothing there has an end to pull.
+                        .then(
+                            if (page == Page.Calls) {
+                                Modifier
+                            } else {
+                                Modifier.verticalScroll(rememberScrollState())
+                            },
+                        )
                         .padding(horizontal = 20.dp)
                         .padding(top = 16.dp, bottom = 32.dp),
                 ) {
                     when (page) {
-                        Page.Dial -> DialPage(
-                            pathfinder = pathfinder,
-                            number = dialNumber,
-                            onNumber = { dialNumber = it },
-                            fromDid = dialDid,
-                            onFromDid = { dialDid = it },
-                        )
                         Page.Calls -> HistoryPage(
                             pathfinder = pathfinder,
                             onUseInDialer = { dial, account ->
-                                // Prefill only. A tap on history is not consent to call.
+                                // Prefill and open the dialer. A tap on history is not consent
+                                // to call, so nothing is dialled here.
                                 dialNumber = dial
                                 dialDid = pathfinder.didForAccount(account)
-                                page = Page.Dial
+                                dialOpen = true
                             },
                         )
                         Page.Settings -> SettingsPage(
@@ -148,6 +208,66 @@ internal fun ProductRoot(pathfinder: Pathfinder) {
                 }
             }
         }
+
+        if (dialOpen && hasCredentials && confirmed) {
+            DialDialog(
+                pathfinder = pathfinder,
+                number = dialNumber,
+                onNumber = { dialNumber = it },
+                fromDid = dialDid,
+                onFromDid = { dialDid = it },
+                status = dialStatus(readiness, live, starting),
+                onDismiss = { dialOpen = false },
+            )
+        }
+
+        // Loading as a dialog rather than a line of small text somewhere off to the side: on
+        // a first launch the app is doing something the person can see, and a bar in a corner
+        // reads as a stuck screen.
+        if (hasCredentials && confirmed && (starting || (fetching && dids.isEmpty()))) {
+            LoadingDialog(
+                title = if (starting) "Setting up your phone…" else "Reading your account…",
+                // The step, not the status line: they said the same sentence, so the dialog
+                // read as a stuck title repeated underneath itself.
+                detail = (provision as? ProvisionState.Working)?.step
+                    ?: if (readiness.registered > 0) "Registered, coming up." else "This takes a few seconds.",
+            )
+        }
+    }
+}
+
+/**
+ * The mock switch, on both screens that need it.
+ *
+ * It belongs on the front door as well as in Settings, because it decides where the app talks
+ * before any credentials exist. Leaving it only in Settings made the mock unreachable: Settings
+ * is behind Connect, and Connect needs an endpoint that answers.
+ *
+ * Debug builds only. When it is on the label says so, because a mock session that looks like a
+ * real one is how a test result gets mistaken for a real one.
+ */
+@Composable
+private fun MockServerSwitch(pathfinder: Pathfinder) {
+    val context = LocalContext.current
+    if (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) return
+    val settings = pathfinder.apiSettings
+    var mock by remember { mutableStateOf(settings.useMock) }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Checkbox(
+            checked = mock,
+            onCheckedChange = { on ->
+                mock = on
+                settings.useMock = on
+                // Only worth reading once there is an account to read. Before that the switch
+                // has already done its job by moving the endpoint.
+                if (settings.credentials() != null) pathfinder.refreshAccount()
+            },
+        )
+        Text(
+            if (mock) "Using the mock on this machine, not the account" else "Use the mock server",
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (mock) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+        )
     }
 }
 
@@ -186,10 +306,12 @@ private fun ConnectPage(pathfinder: Pathfinder, onConnected: () -> Unit) {
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
             modifier = Modifier.fillMaxWidth(),
         )
+        MockServerSwitch(pathfinder)
         Button(
             onClick = {
                 settings.saveApi(email, secret)
-                pathfinder.refreshAccount()
+                // No read here: signing in flips the signed-in state, and the launch effect
+                // reads the account once. Doing both made two identical reads.
                 secret = ""
                 onConnected()
             },
@@ -450,9 +572,12 @@ private fun stateLabel(state: PathState): String = when (state) {
  */
 internal fun dialStatus(
     readiness: Pathfinder.Readiness,
-    state: PathState,
+    state: PathState?,
     starting: Boolean = false,
 ): String = when {
+    // Only the call's own states belong here: registration is reported through readiness, and
+    // reading it from a state that also carried calls is how this line once said "Not
+    // registered" over a phone that was answering.
     state is PathState.Dialing || state is PathState.Ringing || state is PathState.Connected ||
         state is PathState.Ended || state is PathState.Failed -> stateLabel(state)
     readiness.failure != null -> "Not answering: ${readiness.failure}"
@@ -506,8 +631,18 @@ private fun HistoryPage(
     val accountOf = remember(dids, fromDid) {
         fromDid?.let { chosen -> dids.firstOrNull { it.number == chosen }?.routedAccount }
     }
-    val shown = remember(calls.records, accountOf) {
+    // The lines this phone works with, from the numbers chosen here. A call on the account
+    // that never touched one of them is not this phone's history, and offering it invites a
+    // call from a line that is not registered.
+    val selectedNumbers = pathfinder.apiSettings.selectedDids
+    val ourAccounts = remember(dids, selectedNumbers) {
+        dids.filter { it.number in selectedNumbers }
+            .mapNotNull { it.routedAccount?.lowercase() }
+            .toSet()
+    }
+    val shown = remember(calls.records, accountOf, ourAccounts) {
         val rows = collapseLegs(calls.records)
+            .filter { row -> row.accounts.any { it in ourAccounts } }
         if (accountOf == null) {
             rows
         } else {
@@ -515,14 +650,39 @@ private fun HistoryPage(
             rows.filter { accountOf.lowercase() in it.accounts }
         }
     }
-    // Pulling down is the gesture people try first on a list, and the reload is a read of
-    // the provider, which is exactly what a pull means here.
+    // The list scrolls itself so both ends are reachable. The box handles a drag from the top;
+    // the observer below handles a release after an upward drag when there is nothing left to
+    // scroll, which is a pull from the bottom.
+    val pullThreshold = with(LocalDensity.current) { 64.dp.toPx() }
+    val listScroll = rememberScrollState()
     PullToRefreshBox(
         isRefreshing = calls.loading,
         onRefresh = { pathfinder.loadCalls() },
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxSize(),
     ) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(pullThreshold) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        var lastY = down.position.y
+                        var total = 0f
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!change.pressed) break
+                            total += change.position.y - lastY
+                            lastY = change.position.y
+                        }
+                        if (total < -pullThreshold && !listScroll.canScrollForward) {
+                            pathfinder.loadCalls()
+                        }
+                    }
+                }
+                .verticalScroll(listScroll),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Calls", style = MaterialTheme.typography.headlineSmall)
 
         Section(
@@ -530,16 +690,17 @@ private fun HistoryPage(
             "Today and yesterday, as the provider recorded them. A call this phone placed " +
                 "appears here once the provider has written it down.",
         ) {
-            if (filterDids.size > 1) {
-                NumberPicker(
-                    // Not "From": this is the line a call belongs to in either direction,
-                    // so an inbound, missed or failed call is included too.
-                    label = "Line",
-                    options = listOf(null) + filterDids,
-                    selected = fromDid,
-                    onSelect = { fromDid = it },
-                )
-            }
+            // Always present, even before the callable numbers are known. It used to wait for
+            // two of them, so the filter appeared seconds after the list it filters, which
+            // reads as a control arriving late rather than a list loading.
+            NumberPicker(
+                // Not "From": this is the line a call belongs to in either direction, so an
+                // inbound, missed or failed call is included too.
+                label = "Line",
+                options = listOf(null) + filterDids,
+                selected = fromDid,
+                onSelect = { fromDid = it },
+            )
             when {
                 calls.loading && calls.records.isEmpty() -> {
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
@@ -553,6 +714,11 @@ private fun HistoryPage(
                     calls.error.orEmpty(),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
+                )
+                ourAccounts.isEmpty() -> Text(
+                    "No number is set up on this phone yet, so there are no calls to show.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 calls.records.isEmpty() && checkedAt <= 0L -> Text(
                     // Never read is not the same as nothing there, and the difference is
@@ -591,10 +757,16 @@ private fun HistoryPage(
                     }
                 }
             }
-            TextButton(
-                onClick = { pathfinder.loadCalls() },
-                enabled = !calls.loading,
-            ) { Text("Reload") }
+            // No Reload button: the list refreshes by dragging from either end, which is the
+            // gesture people try on a list before they look for a control.
+            if (calls.loading && calls.records.isNotEmpty()) {
+                Text(
+                    "Refreshing…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
         }
     }
     }
@@ -636,8 +808,10 @@ internal fun collapseLegs(records: List<CallRecord>): List<CallRowModel> {
         }
         // An inbound row's destination is our own number, so the useful thing to show is
         // the caller. It was already in the record and we were throwing it away.
+        // Blank rather than the destination: the destination of an inbound call is our own
+        // number, and showing it would name a caller who never called.
         val raw = if (outward == null && inward != null) {
-            callerNumber(inward.callerId).ifBlank { shown.destination }
+            callerNumber(inward.callerId)
         } else {
             shown.destination
         }
@@ -666,7 +840,13 @@ private fun CallRow(call: CallRowModel, onClick: () -> Unit) {
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            Text(prettyNumber(call.destination), style = MaterialTheme.typography.bodyLarge)
+            Text(
+                // A record with no caller id is not a call from our own number, and it should
+                // not look like one.
+                if (call.destination.isBlank()) "Unknown caller"
+                else prettyNumber(call.destination),
+                style = MaterialTheme.typography.bodyLarge,
+            )
             Text(callLength(call.seconds), style = MaterialTheme.typography.bodySmall)
         }
         Text(
@@ -866,129 +1046,153 @@ private fun ToggleChip(label: String, on: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun DialPage(
+private fun DialDialog(
     pathfinder: Pathfinder,
     number: String,
     onNumber: (String) -> Unit,
     fromDid: String?,
     onFromDid: (String?) -> Unit,
+    status: String,
+    onDismiss: () -> Unit,
 ) {
-    val state by pathfinder.state.collectAsState()
-    val stats by pathfinder.stats.collectAsState()
-    val readiness by pathfinder.readiness.collectAsState()
-    val starting by pathfinder.starting.collectAsState()
     val settings = pathfinder.apiSettings
     val context = LocalContext.current
     val fromDids by pathfinder.callableDids.collectAsState()
-    val presenting = fromDid ?: fromDids.firstOrNull()
-    val connected = state is PathState.Connected
-    val busy = connected || state is PathState.Dialing || state is PathState.Ringing
+    // A choice is only meaningless when every option is the same line, because the caller id
+    // comes from the sub-account rather than the number. Picking silently between two identity
+    // is a privacy problem; picking between two names for one line is not.
+    val allDids by pathfinder.dids.collectAsState()
+    val lines_ = fromDids.mapNotNull { did ->
+        allDids.firstOrNull { it.number == did }?.routedAccount
+    }.distinct()
+    val presenting = fromDid ?: fromDids.firstOrNull().takeIf { lines_.size == 1 }
+    // Any absence of a line blocks the call, whether because nothing can present one or
+    // because several could and nobody has chosen. Both used to be allowed through.
+    val needsChoice = presenting == null
+    val readiness by pathfinder.readiness.collectAsState()
     val blocked = callBlockedReason(readiness)
 
     val microphone = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         if (granted) {
-            pathfinder.dialOut(number, presenting)
+            pathfinder.dial(number, presenting)
+            onDismiss()
         } else {
             pathfinder.warn("The microphone permission was not granted.")
         }
     }
+
     fun call() {
         settings.lastNumber = number.trim()
         val allowed = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
-        if (allowed) pathfinder.dialOut(number, presenting) else microphone.launch(Manifest.permission.RECORD_AUDIO)
+        if (allowed) {
+            pathfinder.dial(number, presenting)
+            onDismiss()
+        } else {
+            microphone.launch(Manifest.permission.RECORD_AUDIO)
+        }
     }
 
-    val muted by pathfinder.muted.collectAsState()
-    if (busy || state is PathState.Connected) {
-        CallScreen(
-            number = number,
-            state = state,
-            muted = muted,
-            stats = pathfinder.stats.collectAsState().value,
-            onMuted = { pathfinder.setMuted(it) },
-            onSpeaker = { pathfinder.setSpeaker(it) },
-            onHangUp = { pathfinder.hangUp() },
-            onKey = { pathfinder.sendDtmf(it) },
-        )
-        return
-    }
-
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("Dial", style = MaterialTheme.typography.headlineSmall)
-        Text(
-            dialStatus(readiness, state, starting),
-            style = MaterialTheme.typography.bodyMedium,
-            color = if (readiness.failure != null || state is PathState.Failed) {
-                MaterialTheme.colorScheme.error
-            } else {
-                MaterialTheme.colorScheme.onSurface
-            },
-        )
-
-        Section(
-            "Call",
-            "Calls go out on the sub-account that answers your numbers, and the provider " +
-                "records them the same way.",
-        ) {
-            if (fromDids.size > 1) {
+    Dialog(onDismissRequest = onDismiss) {
+        Card {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text("Call", style = MaterialTheme.typography.titleLarge)
                 Text(
-                    "Call from",
+                    status,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                NumberPicker(
-                    label = "Call from",
-                    options = fromDids,
-                    selected = presenting,
-                    onSelect = onFromDid,
+                OutlinedTextField(
+                    value = number,
+                    onValueChange = onNumber,
+                    label = { Text("Number") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                    modifier = Modifier.fillMaxWidth(),
                 )
-            }
-            OutlinedTextField(
-                value = number,
-                onValueChange = onNumber,
-                label = { Text("Number") },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = { call() },
-                    enabled = !busy && number.isNotBlank() && blocked == null,
-                    modifier = Modifier.weight(1f).height(52.dp),
-                ) { Text("Call") }
-                OutlinedButton(
-                    onClick = { pathfinder.hangUp() },
-                    enabled = busy,
-                    modifier = Modifier.height(52.dp),
-                ) { Text("Hang up") }
-            }
-            if (blocked != null) {
-                Text(
-                    blocked,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            OutlinedButton(
-                onClick = { pathfinder.setSpeaker(!stats.speaker) },
-                enabled = connected,
-                modifier = Modifier.fillMaxWidth().height(52.dp),
-            ) { Text(if (stats.speaker) "Use the earpiece" else "Use the speaker") }
-            if (connected) {
-                Text(
-                    "${stats.framesSent} sent, ${stats.framesReceived} received, ${stats.lost} lost",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                if (fromDids.size > 1) {
+                    NumberPicker(
+                        label = "Call from",
+                        options = fromDids,
+                        selected = presenting,
+                        onSelect = onFromDid,
+                    )
+                }
+                if (needsChoice) {
+                    Text(
+                        if (fromDids.isEmpty()) {
+                            "No number can present a call yet. Check what is answering in Settings."
+                        } else {
+                            "Choose the number this call should come from."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                if (blocked != null) {
+                    Text(
+                        blocked,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { call() },
+                        enabled = number.isNotBlank() && blocked == null && !needsChoice,
+                        modifier = Modifier.weight(1f).height(52.dp),
+                    ) { Text("Call") }
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.height(52.dp),
+                    ) { Text("Cancel") }
+                }
             }
         }
     }
 }
 
+/**
+ * The load screen, as a dialog.
+ *
+ * A first launch spends several seconds reading the account and registering, and a small
+ * line of text low on a page reads as a screen that has stopped working. Not dismissable:
+ * there is nothing behind it to do yet.
+ */
+@Composable
+private fun LoadingDialog(title: String, detail: String) {
+    Dialog(
+        onDismissRequest = {},
+        properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false),
+    ) {
+        Card {
+            Row(
+                modifier = Modifier.padding(20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 3.dp)
+                Column {
+                    Text(title, style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        // The steps are written for the log, so they arrive lower case and
+                        // without punctuation. In a dialog they should read as a sentence.
+                        detail.replaceFirstChar { it.uppercase() }.let {
+                            if (it.endsWith("…") || it.endsWith(".")) it else "$it…"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}
 
 /**
  * Only the settings a person needs, in the order they need them. Everything the probe used
@@ -1010,6 +1214,7 @@ private fun SettingsPage(
     val working = provision as? ProvisionState.Working
     val failed = provision as? ProvisionState.Failed
     val fetching by pathfinder.fetching.collectAsState()
+    val context = LocalContext.current
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Settings", style = MaterialTheme.typography.headlineSmall)
@@ -1020,6 +1225,13 @@ private fun SettingsPage(
         ) {
             Detail("email", settings.apiEmail().ifBlank { "-" })
             Detail("password", "sealed on this device")
+            // No state is shown here: whether the account is enabled cannot be read without
+            // READ_PHONE_NUMBERS. The call itself reports which path it took.
+            TextButton(
+                onClick = { context.startActivity(TelecomBridge.settingsIntent()) },
+            ) { Text("Android call settings") }
+
+            MockServerSwitch(pathfinder)
             TextButton(
                 onClick = {
                     settings.clearApi()

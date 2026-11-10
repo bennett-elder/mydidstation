@@ -193,7 +193,13 @@ internal class Call(
         pending.clear()
         link?.close()
         link = null
-        _state.value = PathState.Unregistered
+        // Never a registration state. This used to reset to `Unregistered`, so a call that had
+        // finished announced itself as "nothing registered", and anything watching the call
+        // (the call screen, Android's connection) could not tell an ending from a phone that
+        // had never been set up. A closed call is an ended call or nothing changes.
+        if (_state.value !is PathState.Ended && _state.value !is PathState.Failed) {
+            _state.value = PathState.Ended("closed")
+        }
     }
 
     private fun open() {

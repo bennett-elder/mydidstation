@@ -12,6 +12,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Android's call stack carries our calls so the system owns audio focus, routing and
+         the lock screen. Without it the app is an audio player that happens to be a phone. -->
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
 
     <application
         android:name=".PathfinderApp"
@@ -29,6 +32,15 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".VoiceConnectionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE">
+            <intent-filter>
+                <action android:name="android.telecom.ConnectionService" />
+            </intent-filter>
+        </service>
 
         <service
             android:name=".PathfinderService"

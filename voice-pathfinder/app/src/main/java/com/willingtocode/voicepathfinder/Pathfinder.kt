@@ -149,7 +149,24 @@ class Pathfinder(
     private val cseqLock = Any()
 
     private val _state = MutableStateFlow<PathState>(PathState.Unregistered)
+
+    /**
+     * Registration and readiness. Readiness reporting writes here, so this flow answers
+     * "can this phone take calls" and never "is a call up".
+     */
     val state: StateFlow<PathState> = _state
+
+    private val _call = MutableStateFlow<PathState?>(null)
+
+    /**
+     * The live call, or null when there is none.
+     *
+     * Separate from [state] because the two were one flow and fought: readiness publishing
+     * wrote `Unregistered` into the same place the call had written `Connected`, so a finished
+     * call arrived as "nothing registered" and anything watching it had to guess which
+     * lifecycle it was looking at. Two questions, two flows.
+     */
+    val callState: StateFlow<PathState?> = _call
 
     /** The live call's counters: the product's call if one is up, otherwise the probe's. */
     val stats: StateFlow<MediaStats> get() = outbound?.mediaStats ?: noCallStats
@@ -324,12 +341,41 @@ class Pathfinder(
      * and the call builds its own transport and media. One call at a time until the ringing
      * policy is decided.
      */
+    /**
+     * Places the call, through Android's call stack when that account is enabled, and
+     * directly otherwise.
+     *
+     * Telecom re-enters this class through [VoiceConnectionService], which is the only thing
+     * that sends an INVITE. Two ways to reach one path, rather than two paths.
+     *
+     * The fallback matters: a self-managed account stays disabled until somebody enables it
+     * in Settings, and a phone that cannot call until then is worse than one that calls
+     * without system integration.
+     */
+    fun dial(number: String, fromDid: String? = null) {
+        if (Provider.normalizeNumber(number).isEmpty()) return fail("Enter a number to dial.")
+        val refused = TelecomBridge.placeCall(appContext, Provider.normalizeNumber(number), fromDid)
+        if (refused == null) {
+            note("placing the call through Android's call stack")
+            return
+        }
+        note("Android will not carry this call ($refused); dialling directly")
+        dialOut(number, fromDid)
+    }
+
     fun dialOut(rawNumber: String, fromDid: String? = null) {
         val number = Provider.normalizeNumber(rawNumber)
         if (number.isEmpty()) return fail("Enter a number to dial.")
         if (outbound?.state?.value is PathState.Connected) return fail("A call is already up.")
         val line = lineFor(fromDid)
-            ?: return fail("No line is registered, so there is nothing to call on.")
+            ?: return fail(
+                if (fromDid == null) {
+                    "Choose the number this call should come from."
+                } else {
+                    "$fromDid is not answering, so the call would go out on a different " +
+                        "number. Pick a number that is registered."
+                },
+            )
         settings.lastNumber = rawNumber.trim()
         val call = Call(
             credentials = line.credentials,
@@ -346,14 +392,17 @@ class Pathfinder(
         // socket and RTP port are resources, not history.
         scope.launch {
             call.state.collect { state ->
-                _state.value = state
+                _call.value = state
                 if (state is PathState.Ended || state is PathState.Failed) {
                     call.close()
                     if (outbound === call) outbound = null
                 }
             }
         }
-        scope.launch { call.dial(number, OfferMode.PCMU) }
+        // The mock in tools/mock_sip.py has no SRTP stack, so a mock session offers clear
+        // PCMU. Real sessions offer RTP/SAVP, which is what the account requires.
+        val mode = if (apiSettings.useMock) OfferMode.PCMU_CLEAR else OfferMode.PCMU
+        scope.launch { call.dial(number, mode) }
     }
 
     /**
@@ -365,10 +414,13 @@ class Pathfinder(
      */
     internal fun lineFor(fromDid: String?): Line? {
         val registered = _activeLines.value.filter { it.state.value is LineState.Registered }
-        if (fromDid == null) return registered.firstOrNull()
+        // Never an implicit line. Choosing which number a call comes from is the caller's
+        // decision, and answering with a different one is a privacy problem, not a convenience.
+        if (fromDid == null) return null
         val account = _dids.value.firstOrNull { it.number == fromDid }?.routedAccount
+        // No fallback. Answering with a different line than the one asked for means a call
+        // arrives at someone from a number they were not shown, which is worse than refusing.
         return registered.firstOrNull { it.account.equals(account, ignoreCase = true) }
-            ?: registered.firstOrNull()
     }
 
     /**
@@ -384,8 +436,10 @@ class Pathfinder(
             .filter { it.routedAccount?.equals(account, ignoreCase = true) == true }
             .map { it.number }
         if (matching.isEmpty()) return null
+        // Only a number that can present a call. Handing back one that merely exists made the
+        // dialer preselect a line it then could not use, and the engine substituted another.
         val callable = _callableDids.value.toSet()
-        return matching.firstOrNull { it in callable } ?: matching.first()
+        return matching.firstOrNull { it in callable }
     }
 
     /** The DIDs a call can be presented from: chosen, and routed at a registered line. */
@@ -400,13 +454,16 @@ class Pathfinder(
     }
 
     fun hangUp() {
-        val call = outbound
-        if (call != null) {
-            scope.launch {
-                call.hangUp()
-                call.close()
-                outbound = null
-            }
+        val call = outbound ?: return
+        scope.launch {
+            call.hangUp()
+            call.close()
+            if (outbound === call) outbound = null
+            // The end of the call is published here rather than left to the call's own
+            // collector: closing it cancels that collector, and closing happens right after
+            // the BYE. Without this the published state stayed at Connected forever, so the
+            // call screen never went away and Android was never told the call had ended.
+            _call.value = PathState.Ended("hung up")
         }
     }
 
@@ -422,8 +479,12 @@ class Pathfinder(
     }
 
     fun setSpeaker(on: Boolean) {
-        val call = outbound
-        call?.setSpeaker(on)
+        // Both, deliberately: Telecom holds the route during a self-managed call, and the media
+        // layer keeps the flag the screen reads. Asking only the audio manager looked like it
+        // worked and changed nothing, because the platform overruled it.
+        val viaPlatform = TelecomBridge.routeToSpeaker(on)
+        outbound?.setSpeaker(on)
+        if (viaPlatform) note("speaker ${if (on) "on" else "off"}, routed by Android")
     }
 
     /** Ends the call, deregisters, and leaves nothing running. */
@@ -482,6 +543,9 @@ class Pathfinder(
      * screen gets a single failure to report rather than two.
      */
     fun refreshAccount() {
+        // Nothing to read with: a debug session can point at the mock before signing in, and
+        // an error about a missing key is not a thing the person ticking that box did wrong.
+        if (apiSettings.credentials() == null) return
         scope.launch {
             _fetching.value = true
             _fetchError.value = null
@@ -553,7 +617,12 @@ class Pathfinder(
             refreshAccount()
             return
         }
-        note("${_dids.value.size} number(s) from the saved list")
+        // Distinct from the restore's own line, which says the same count for a different
+        // reason. Two identical sentences 800 ms apart read as a double launch and sent me
+        // hunting one that never existed.
+        note("launching with ${_dids.value.size} saved number(s); restoring registration")
+        // Not reported here: reading whether the account is enabled needs READ_PHONE_NUMBERS,
+        // so the state is discovered by attempting a call and logging the outcome there.
         startIfConfigured()
     }
 
@@ -1122,6 +1191,9 @@ class Pathfinder(
             actual.maxExpiry == wanted.maxExpiry
 
     // ------------------------------------------------------------------------ logging
+
+    /** One line in the same log the screens show, for code outside this class. */
+    internal fun noteFromElsewhere(text: String) = note(text)
 
     private fun note(text: String) {
         val stamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
