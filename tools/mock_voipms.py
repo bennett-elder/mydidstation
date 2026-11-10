@@ -64,6 +64,7 @@ DIDS = [
         "description": "Mock main",
         "routing": "account:100001_VoIP",
         "voicemail": "1001",
+        "dialtime": "60",
         "pop": "16",
         "billing_type": "2",
         "cnam": "1",

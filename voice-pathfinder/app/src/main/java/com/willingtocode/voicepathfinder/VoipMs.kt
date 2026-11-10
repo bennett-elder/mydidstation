@@ -97,6 +97,16 @@ data class CallRecord(
     val description: String,
     val seconds: Int,
     val logs: String,
+    /**
+     * The sub-account this leg belongs to, as the provider reports it.
+     *
+     * This is what makes the history filterable per number: a DID routes to a sub-account,
+     * and the CDR row names that sub-account. Parsing it is cheaper and truer than keeping
+     * a second, local list of which line placed what.
+     */
+    val account: String = "",
+    /** Who the provider says was on the far end, for a call we did not place. */
+    val callerId: String = "",
 )
 
 /**
@@ -108,9 +118,37 @@ data class CallRecord(
  * because it is the only way to write back a generated password or turn on G.722, and it
  * is used narrowly for those two things.
  */
+/**
+ * One phone number, as `getDIDsInfo` reports it.
+ *
+ * [routing] is what decides whether a call to this number can reach us at all: it reads
+ * `account:<sub-account>`, or `vm:<mailbox>`, or `fwd:<number>`, or `sys:...`. Only the
+ * first kind rings a sub-account that this app can register.
+ */
+data class Did(
+    val number: String,
+    val description: String,
+    val routing: String,
+    val voicemail: String,
+    val dialtime: Int,
+) {
+    /** The sub-account this DID rings, or null when it routes somewhere else. */
+    val routedAccount: String?
+        get() = routing.substringAfter("account:", "").takeIf { routing.startsWith("account:") && it.isNotBlank() }
+}
+
 class VoipMs(private val settings: ApiSettings) {
 
+    /**
+     * Reads are capped generously on purpose.
+     *
+     * Measured on 2026-11-09: a bare request to the endpoint took 9.97 s from a working
+     * network, and a `setSubAccount` took 54 s. At a 30 s ceiling, `getDIDsInfo` was being
+     * killed mid-flight and reported as `timeout`, which looked like a dead button.
+     */
     private val http = OkHttpClient.Builder()
+        .connectTimeout(CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .readTimeout(READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .callTimeout(HTTP_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .build()
 
@@ -160,6 +198,25 @@ class VoipMs(private val settings: ApiSettings) {
                 maxExpiry = row.optString("max_expiry").trim().toIntOrNull() ?: 300,
                 protocol = row.optString("protocol").trim(),
                 dialingMode = row.optString("dialing_mode").trim(),
+            )
+        }
+        return out
+    }
+
+    suspend fun dids(): List<Did> {
+        val json = call("getDIDsInfo")
+        val rows = json.optJSONArray("dids") ?: return emptyList()
+        val out = mutableListOf<Did>()
+        for (i in 0 until rows.length()) {
+            val row = rows.optJSONObject(i) ?: continue
+            val number = row.optString("did").trim()
+            if (number.isEmpty()) continue
+            out += Did(
+                number = number,
+                description = row.optString("description").trim(),
+                routing = row.optString("routing").trim(),
+                voicemail = row.optString("voicemail").trim(),
+                dialtime = row.optString("dialtime").trim().toIntOrNull() ?: 0,
             )
         }
         return out
@@ -231,6 +288,8 @@ class VoipMs(private val settings: ApiSettings) {
                 description = row.optString("description").trim(),
                 seconds = row.optString("seconds").trim().toIntOrNull() ?: 0,
                 logs = row.optString("call_logs").trim(),
+                account = row.optString("account").trim(),
+                callerId = row.optString("callerid").trim(),
             )
         }
         return out
@@ -269,8 +328,9 @@ class VoipMs(private val settings: ApiSettings) {
     }
 
     private companion object {
-        const val HTTP_TIMEOUT_SECONDS = 30L
+        const val HTTP_TIMEOUT_SECONDS = 90L
         const val CONNECT_TIMEOUT_SECONDS = 15L
+        const val READ_TIMEOUT_SECONDS = 60L
         const val WRITE_TIMEOUT_SECONDS = 120L
         const val WRITE_CALL_TIMEOUT_SECONDS = 180L
 

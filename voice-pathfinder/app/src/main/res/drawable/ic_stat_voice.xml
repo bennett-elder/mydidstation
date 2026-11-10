@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Three bars, drawn here rather than taken from android.R, whose call icons are
+     deprecated. A notification small icon must be a single colour on transparent. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M4,15h3v5H4z M10.5,10.5h3V20h-3z M17,6h3v14h-3z" />
+</vector>

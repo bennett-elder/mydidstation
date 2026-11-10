@@ -164,6 +164,65 @@ class PathfinderSettings(
             prefs.edit().putString(KEY_OFFER, value).apply()
         }
 
+    /**
+     * The numbers the user chose to answer, by DID. Their routing decides whether a call
+     * can arrive at all, so this is the selection the product is built around.
+     */
+    var selectedDids: Set<String>
+        get() = prefs.getStringSet(KEY_DIDS, emptySet())?.toSet() ?: emptySet()
+        set(value) {
+            prefs.edit().putStringSet(KEY_DIDS, value).apply()
+        }
+
+    /** True once the first-run number choice has been made, which ends onboarding. */
+    var numbersConfirmed: Boolean
+        get() = prefs.getBoolean(KEY_CONFIRMED, false)
+        set(value) {
+            prefs.edit().putBoolean(KEY_CONFIRMED, value).apply()
+        }
+
+    /**
+     * The list of numbers from the last successful read, so the first screen after a
+     * restart is populated before the API has answered.
+     */
+    var didCache: String
+        get() = prefs.getString(KEY_DID_CACHE, "") ?: ""
+        set(value) {
+            prefs.edit().putString(KEY_DID_CACHE, value).apply()
+        }
+
+    /**
+     * When the number list was last read from the account, or 0 for never.
+     *
+     * Stored, so the screen can say how stale the list is after a restart rather than
+     * presenting yesterday's numbers as if they had just arrived.
+     */
+    var checkedAt: Long
+        get() = prefs.getLong(KEY_CHECKED_AT, 0L)
+        set(value) {
+            prefs.edit().putLong(KEY_CHECKED_AT, value).apply()
+        }
+
+    /**
+     * The call list from the last successful read, so a history screen draws instantly.
+     *
+     * Same contract as [didCache]: the screen has something to show before the provider
+     * answers, and the read that replaces it happens behind that content rather than in
+     * front of a blank screen.
+     */
+    var callsCache: String
+        get() = prefs.getString(KEY_CALLS_CACHE, "") ?: ""
+        set(value) {
+            prefs.edit().putString(KEY_CALLS_CACHE, value).apply()
+        }
+
+    /** When the call list was last read, or 0 for never. */
+    var callsCheckedAt: Long
+        get() = prefs.getLong(KEY_CALLS_CHECKED_AT, 0L)
+        set(value) {
+            prefs.edit().putLong(KEY_CALLS_CHECKED_AT, value).apply()
+        }
+
     private companion object {
         const val PREFS = "pathfinder"
 
@@ -180,6 +239,12 @@ class PathfinderSettings(
         const val KEY_TLS = "sip_tls"
         const val KEY_LAST_NUMBER = "last_number"
         const val KEY_OFFER = "offer_mode"
+        const val KEY_DIDS = "selected_dids"
+        const val KEY_CHECKED_AT = "checked_at"
+        const val KEY_CALLS_CACHE = "calls_cache"
+        const val KEY_CALLS_CHECKED_AT = "calls_checked_at"
+        const val KEY_DID_CACHE = "did_cache"
+        const val KEY_CONFIRMED = "numbers_confirmed"
 
         const val DEFAULT_ENDPOINT = "https://voip.ms/api/v1/rest.php"
     }

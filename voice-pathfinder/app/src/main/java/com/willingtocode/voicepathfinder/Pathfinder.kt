@@ -3,6 +3,8 @@ package com.willingtocode.voicepathfinder
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -135,11 +137,13 @@ internal class SipFault(message: String) : Exception(message)
  * owns this and the activity only observes it. Rotating the phone therefore does not
  * drop a call, which matters when the thing being tested is audio.
  */
-class Pathfinder(context: Context) {
+class Pathfinder(
+    context: Context,
+    private val settings: PathfinderSettings = PathfinderSettings(context.applicationContext),
+) {
 
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val settings = PathfinderSettings(appContext)
     private val api = VoipMs(settings)
     private val random = SecureRandom()
     private val cseqLock = Any()
@@ -147,8 +151,8 @@ class Pathfinder(context: Context) {
     private val _state = MutableStateFlow<PathState>(PathState.Unregistered)
     val state: StateFlow<PathState> = _state
 
-    private val _stats = MutableStateFlow(MediaStats())
-    val stats: StateFlow<MediaStats> = _stats
+    /** The live call's counters: the product's call if one is up, otherwise the probe's. */
+    val stats: StateFlow<MediaStats> get() = outbound?.mediaStats ?: noCallStats
 
     private val _answers = MutableStateFlow(ProbeAnswers())
     val answers: StateFlow<ProbeAnswers> = _answers
@@ -178,6 +182,31 @@ class Pathfinder(context: Context) {
 
     private val _calls = MutableStateFlow(CallsView())
     val calls: StateFlow<CallsView> = _calls
+
+    private val _dids = MutableStateFlow<List<Did>>(emptyList())
+    val dids: StateFlow<List<Did>> = _dids
+
+    private val _checkedAt = MutableStateFlow(settings.checkedAt)
+    val checkedAt: StateFlow<Long> = _checkedAt
+
+    /** When the call list was last read, 0 for never. The same contract as [checkedAt]. */
+    private val _muted = MutableStateFlow(false)
+    val muted: StateFlow<Boolean> = _muted
+
+    private val _callsCheckedAt = MutableStateFlow(settings.callsCheckedAt)
+    val callsCheckedAt: StateFlow<Long> = _callsCheckedAt
+
+    /** The last account-read failure, so a screen can say why nothing appeared. */
+    private val _fetchError = MutableStateFlow<String?>(null)
+    val fetchError: StateFlow<String?> = _fetchError
+
+    /** True while an account read is in flight, so the screen can say "loading" not "empty". */
+    private val _fetching = MutableStateFlow(false)
+    val fetching: StateFlow<Boolean> = _fetching
+
+    /** One registration per sub-account carrying a chosen number. */
+    private val _activeLines = MutableStateFlow<List<Line>>(emptyList())
+    internal val activeLines: StateFlow<List<Line>> = _activeLines
 
     @Volatile private var prepared: SubAccount? = null
 
@@ -223,16 +252,12 @@ class Pathfinder(context: Context) {
         var cseq: Int,
     )
 
-    @Volatile private var rtpSocket: DatagramSocket? = null
-    @Volatile private var audio: CallAudio? = null
-    @Volatile private var remoteMedia: InetSocketAddress? = null
-    private val jitter = JitterBuffer()
-    private val mediaJobs = mutableListOf<Job>()
-    private var statsJob: Job? = null
 
-    private var sequence = 0
-    private var timestamp = 0L
-    @Volatile private var ssrc = 0L
+    /** The call placed from the dial page, if any. One at a time for now. */
+    @Volatile private var outbound: Call? = null
+
+    /** Counters for the probe-less case: the app shows the call's own when one is up. */
+    private val noCallStats = MutableStateFlow(MediaStats())
 
     /** The Expires this client asks for, when it differs from what the account allows. */
     @Volatile private var expiryRequest: Int? = null
@@ -240,13 +265,6 @@ class Pathfinder(context: Context) {
     /** The inline key this call put in its offer, base64, needed to decrypt what comes back. */
     @Volatile private var localCryptoKey = ""
 
-    @Volatile private var srtpOut: SrtpContext? = null
-    @Volatile private var srtpIn: SrtpContext? = null
-    private val framesSent = AtomicLong()
-    private val framesReceived = AtomicLong()
-    private val datagrams = AtomicLong()
-    @Volatile private var sendPeak = 0f
-    @Volatile private var receivePeak = 0f
 
     // ---------------------------------------------------------------- public surface
 
@@ -299,57 +317,113 @@ class Pathfinder(context: Context) {
         }
     }
 
-    fun dial(rawNumber: String, mode: OfferMode) {
-        val credentials = credentials ?: return fail("Register first.")
-        if (!registered) return fail("Not registered right now.")
-        if (_state.value is PathState.Connected) return fail("A call is already up.")
+    /**
+     * Places a call on the first registered line.
+     *
+     * The line supplies the credentials, so the call presents that sub-account's identity,
+     * and the call builds its own transport and media. One call at a time until the ringing
+     * policy is decided.
+     */
+    fun dialOut(rawNumber: String, fromDid: String? = null) {
         val number = Provider.normalizeNumber(rawNumber)
         if (number.isEmpty()) return fail("Enter a number to dial.")
+        if (outbound?.state?.value is PathState.Connected) return fail("A call is already up.")
+        val line = lineFor(fromDid)
+            ?: return fail("No line is registered, so there is nothing to call on.")
         settings.lastNumber = rawNumber.trim()
-        // A fresh SDES key per call. The answer's own key plus this one is the whole
-        // exchange, so a stale key here would mean silence rather than an error.
-        localCryptoKey = Sdp.newCryptoKey()
-        srtpOut = null
-        srtpIn = null
+        val call = Call(
+            credentials = line.credentials,
+            media = MediaSession(
+                note = { text -> note(text) },
+                socketFactory = { LocalNetwork.rtpSocket() },
+                audioFactory = { log -> CallAudio(appContext, log) },
+            ),
+            scope = scope,
+            note = { text -> note(text) },
+        )
+        outbound = call
+        // The state is mirrored, and the end of the call is the end of the object: its
+        // socket and RTP port are resources, not history.
         scope.launch {
-            try {
-                val socket = LocalNetwork.rtpSocket()
-                    ?: throw SipFault("no free RTP port in ${LocalNetwork.RTP_FIRST}-${LocalNetwork.RTP_LAST}")
-                rtpSocket = socket
-                _answers.update {
-                    it.copy(
-                        offered = mode.label,
-                        protocol = "",
-                        encrypted = false,
-                        cryptoLines = 0,
-                        negotiated = "",
-                        payloadTypes = "",
-                        ptime = null,
-                        remoteMedia = "",
-                        inviteMillis = -1,
-                    )
+            call.state.collect { state ->
+                _state.value = state
+                if (state is PathState.Ended || state is PathState.Failed) {
+                    call.close()
+                    if (outbound === call) outbound = null
                 }
-                _stats.value = MediaStats(localRtpPort = socket.localPort)
-                _state.value = PathState.Dialing(number)
-                note("dialing $number, offering ${mode.label}, RTP port ${socket.localPort}")
-                invite(credentials, number, mode, socket)
-            } catch (fault: Exception) {
-                endCall("call failed: ${describe(fault)}", failed = true)
+            }
+        }
+        scope.launch { call.dial(number, OfferMode.PCMU) }
+    }
+
+    /**
+     * The line a call should go out on.
+     *
+     * A chosen DID decides it: the number's routing names a sub-account, and the line for
+     * that sub-account carries the identity the far end will see. Without a choice, the
+     * first registered line is used, which is what a single-number account wants.
+     */
+    internal fun lineFor(fromDid: String?): Line? {
+        val registered = _activeLines.value.filter { it.state.value is LineState.Registered }
+        if (fromDid == null) return registered.firstOrNull()
+        val account = _dids.value.firstOrNull { it.number == fromDid }?.routedAccount
+        return registered.firstOrNull { it.account.equals(account, ignoreCase = true) }
+            ?: registered.firstOrNull()
+    }
+
+    /**
+     * The number a call on [account] would be presented from.
+     *
+     * Used by the history when a row is tapped: the row names the sub-account, and the
+     * dialer needs the line, which is the DID routed at that sub-account. A number that is
+     * callable now is preferred over one that merely exists.
+     */
+    fun didForAccount(account: String?): String? {
+        if (account.isNullOrBlank()) return null
+        val matching = _dids.value
+            .filter { it.routedAccount?.equals(account, ignoreCase = true) == true }
+            .map { it.number }
+        if (matching.isEmpty()) return null
+        val callable = _callableDids.value.toSet()
+        return matching.firstOrNull { it in callable } ?: matching.first()
+    }
+
+    /** The DIDs a call can be presented from: chosen, and routed at a registered line. */
+    fun numbersToCallFrom(): List<String> {
+        val registered = _activeLines.value
+            .filter { it.state.value is LineState.Registered }
+            .map { it.account.lowercase() }
+            .toSet()
+        return _dids.value
+            .filter { it.routedAccount?.lowercase() in registered }
+            .map { it.number }
+    }
+
+    fun hangUp() {
+        val call = outbound
+        if (call != null) {
+            scope.launch {
+                call.hangUp()
+                call.close()
+                outbound = null
             }
         }
     }
 
-    fun hangUp() {
-        when (_state.value) {
-            is PathState.Dialing, is PathState.Ringing -> scope.launch { cancelInvite() }
-            is PathState.Connected -> scope.launch { bye() }
-            else -> Unit
-        }
+    /** A keypad press, sent on the live call if there is one. */
+    fun sendDtmf(key: Char) {
+        outbound?.sendDtmf(key)
+    }
+
+    /** The in-call screen's mute, applied to whichever call is live. */
+    fun setMuted(on: Boolean) {
+        outbound?.setMuted(on)
+        _muted.value = on
     }
 
     fun setSpeaker(on: Boolean) {
-        audio?.setSpeaker(on)
-        _stats.update { it.copy(speaker = on) }
+        val call = outbound
+        call?.setSpeaker(on)
     }
 
     /** Ends the call, deregisters, and leaves nothing running. */
@@ -401,6 +475,251 @@ class Pathfinder(context: Context) {
     }
 
     /**
+     * One read of everything the front screen needs, in sequence.
+     *
+     * Fired together, the two reads competed for an API that answers in about ten seconds,
+     * and both timed out at once. In sequence the second one reuses the connection and the
+     * screen gets a single failure to report rather than two.
+     */
+    fun refreshAccount() {
+        scope.launch {
+            _fetching.value = true
+            _fetchError.value = null
+            try {
+                try {
+                    val accounts = api.subAccounts()
+                    _accounts.value = accounts
+                    note("${accounts.size} sub-account(s) on this account")
+                } catch (fault: Exception) {
+                    _fetchError.value = describe(fault)
+                    note("could not list sub-accounts: ${describe(fault)}")
+                }
+                try {
+                    val list = api.dids()
+                    _dids.value = list
+                    cacheDids(list)
+                    publishReadiness()
+                    settings.checkedAt = System.currentTimeMillis()
+                    _checkedAt.value = settings.checkedAt
+                    note("${list.size} number(s) on this account")
+                    // Anything still selected that has gone deserves saying out loud rather
+                    // than quietly ringing nothing.
+                    val gone = settings.selectedDids - list.map { it.number }.toSet()
+                    if (gone.isNotEmpty()) note("no longer on the account: ${gone.joinToString(", ")}")
+                } catch (fault: Exception) {
+                    _fetchError.value = describe(fault)
+                    note("could not load the numbers: ${describe(fault)}")
+                }
+            } finally {
+                _fetching.value = false
+            }
+            // If the portal moved a chosen number to a different sub-account, the lines have
+            // to follow, or the phone keeps answering a line the number no longer reaches.
+            if (_fetchError.value == null && settings.selectedDids.isNotEmpty()) {
+                val implied = _dids.value
+                    .filter { it.number in settings.selectedDids }
+                    .mapNotNull { it.routedAccount }
+                    .toSet()
+                val registered = _activeLines.value.map { it.account }.toSet()
+                if (implied != registered) {
+                    note("the routing of a chosen number changed; reconciling the lines")
+                    answerOnSelected()
+                    return@launch
+                }
+            }
+            // "None of the chosen numbers routes to a sub-account" was true only because
+            // the list had not arrived yet, so it must not outlive the list.
+            if (_fetchError.value == null) {
+                if (_provision.value is ProvisionState.Failed) _provision.value = ProvisionState.Idle
+                if (settings.selectedDids.isNotEmpty() && _activeLines.value.isEmpty()) {
+                    answerOnSelected()
+                }
+            }
+        }
+    }
+
+    /**
+     * The launch path.
+     *
+     * The numbers come from the cache, so the first screen is populated immediately. Only
+     * what registration needs is fetched: the sub-account record, because the SIP password
+     * is deliberately never stored. The number list is re-read when there is no cache, when
+     * the user presses Reload, or on the service's timer, which keeps a stale routing from
+     * going unnoticed without paying for two slow reads at every launch.
+     */
+    fun startUp() {
+        if (_dids.value.isEmpty()) {
+            // Nothing cached, so this launch has to read the account anyway.
+            refreshAccount()
+            return
+        }
+        note("${_dids.value.size} number(s) from the saved list")
+        startIfConfigured()
+    }
+
+    /**
+     * What the lines are actually doing, for the screen.
+     *
+     * The probe's [state] describes one call. Registration belongs to the lines, and there
+     * can be several, so a page that reported `state` said "Not registered" over a phone
+     * that was quietly answering. This is the single place that summary is computed.
+     */
+    data class Readiness(
+        val lines: Int = 0,
+        val registered: Int = 0,
+        val preparing: Boolean = false,
+        val failure: String? = null,
+        val grantedSeconds: Int = 0,
+    )
+
+    private val _readiness = MutableStateFlow(Readiness())
+    val readiness: StateFlow<Readiness> = _readiness
+
+    /**
+     * True until the first registration attempt has produced a line or failed.
+     *
+     * The screens need this apart from [readiness], because a phone that has not finished
+     * starting is not a phone with nothing set up, and saying so is a lie the user reads as
+     * a fault.
+     */
+    private val _starting = MutableStateFlow(true)
+    val starting: StateFlow<Boolean> = _starting
+
+    /**
+     * The numbers a call can be placed from right now.
+     *
+     * Derived where readiness is derived, because a screen that computed this itself ended
+     * up with a snapshot taken before the registration landed, and so an empty picker.
+     */
+    private val _callableDids = MutableStateFlow<List<String>>(emptyList())
+    val callableDids: StateFlow<List<String>> = _callableDids
+
+    private fun publishReadiness() {
+        val all = _activeLines.value
+        val states = all.map { it.state.value }
+        _readiness.value = Readiness(
+            lines = all.size,
+            registered = states.count { it is LineState.Registered },
+            preparing = states.any { it is LineState.Preparing },
+            failure = states.firstNotNullOfOrNull { (it as? LineState.Failed)?.reason },
+            grantedSeconds = states.filterIsInstance<LineState.Registered>()
+                .minOfOrNull { it.grantedSeconds } ?: 0,
+        )
+        if (all.isNotEmpty()) _starting.value = false
+        val live = all.filter { it.state.value is LineState.Registered }
+            .map { it.account.lowercase() }
+            .toSet()
+        _callableDids.value = _dids.value
+            .filter { it.routedAccount?.lowercase() in live }
+            .map { it.number }
+    }
+
+    /** Re-registers the chosen numbers after a restart, because a phone should not need a tap. */
+    fun startIfConfigured() {
+        if (!settings.numbersConfirmed) return
+        if (settings.selectedDids.isEmpty()) return
+        if (_activeLines.value.isNotEmpty()) return
+        if (_dids.value.isEmpty()) {
+            // No cached list yet, so the refresh will call this again when it lands.
+            note("waiting for the number list before restoring the registration")
+            return
+        }
+        note("restoring the chosen numbers after a restart")
+        answerOnSelected()
+    }
+
+    /** Reads the number list written by the last successful fetch. */
+    private fun restoreDids() {
+        val cached = settings.didCache
+        if (cached.isBlank()) return
+        runCatching {
+            val array = JSONArray(cached)
+            val out = mutableListOf<Did>()
+            for (i in 0 until array.length()) {
+                val row = array.getJSONObject(i)
+                out += Did(
+                    number = row.optString("did"),
+                    description = row.optString("description"),
+                    routing = row.optString("routing"),
+                    voicemail = row.optString("voicemail"),
+                    dialtime = row.optInt("dialtime"),
+                )
+            }
+            if (out.isNotEmpty()) {
+                _dids.value = out
+                publishReadiness()
+                note("${out.size} number(s) from the saved list")
+            }
+        }.onFailure { note("the saved number list could not be read; it will be fetched") }
+    }
+
+    /** Reads the call list written by the last successful fetch. */
+    private fun restoreCalls() {
+        val cached = settings.callsCache
+        if (cached.isBlank()) return
+        runCatching {
+            val array = JSONArray(cached)
+            val out = mutableListOf<CallRecord>()
+            for (i in 0 until array.length()) {
+                val row = array.getJSONObject(i)
+                out += CallRecord(
+                    date = row.optString("date"),
+                    destination = row.optString("destination"),
+                    disposition = row.optString("disposition"),
+                    description = row.optString("description"),
+                    seconds = row.optInt("seconds"),
+                    logs = row.optString("logs"),
+                    account = row.optString("account"),
+                    callerId = row.optString("callerId"),
+                )
+            }
+            if (out.isNotEmpty()) {
+                _calls.value = CallsView(records = out)
+                note("${out.size} call record(s) from the saved list")
+            }
+        }.onFailure { note("the saved call list could not be read; it will be fetched") }
+    }
+
+    private fun cacheCalls(list: List<CallRecord>) {
+        val array = JSONArray()
+        for (record in list) {
+            array.put(
+                JSONObject()
+                    .put("date", record.date)
+                    .put("destination", record.destination)
+                    .put("disposition", record.disposition)
+                    .put("description", record.description)
+                    .put("seconds", record.seconds)
+                    .put("logs", record.logs)
+                    .put("account", record.account)
+                    .put("callerId", record.callerId),
+            )
+        }
+        settings.callsCache = array.toString()
+    }
+
+    private fun cacheDids(list: List<Did>) {
+        val array = JSONArray()
+        for (did in list) {
+            array.put(
+                JSONObject()
+                    .put("did", did.number)
+                    .put("description", did.description)
+                    .put("routing", did.routing)
+                    .put("voicemail", did.voicemail)
+                    .put("dialtime", did.dialtime),
+            )
+        }
+        settings.didCache = array.toString()
+    }
+
+    /** Saves the chosen numbers. Nothing else in the app decides which calls it answers. */
+    fun selectDids(numbers: Set<String>) {
+        settings.selectedDids = numbers
+        note("answering ${numbers.size} number(s)")
+    }
+
+    /**
      * Asks the provider what it recorded for today's calls.
      *
      * This is the only way to learn why a call the provider accepted did not complete:
@@ -409,7 +728,9 @@ class Pathfinder(context: Context) {
      */
     fun loadCalls() {
         scope.launch {
-            _calls.value = CallsView(loading = true)
+            // The saved list stays on screen while this runs: a history that blanks itself
+            // on every refresh is a screen the user cannot read.
+            _calls.value = _calls.value.copy(loading = true, error = null)
             try {
                 val format = SimpleDateFormat("yyyy-MM-dd", Locale.US)
                 val now = System.currentTimeMillis()
@@ -417,10 +738,25 @@ class Pathfinder(context: Context) {
                     fromDate = format.format(Date(now - DAY_MILLIS)),
                     toDate = format.format(Date(now)),
                 )
-                _calls.value = CallsView(records = records.take(CALL_RECORDS_SHOWN))
+                // Every record the window covers, not the first eight. The cap was a
+                // display limit that read as "there are no more calls", and it hid a
+                // missed call that the log said had been read.
+                _calls.value = CallsView(records = records)
+                cacheCalls(records)
+                settings.callsCheckedAt = System.currentTimeMillis()
+                _callsCheckedAt.value = settings.callsCheckedAt
                 note("read ${records.size} call record(s) from the provider")
+                // Temporary: the history has to be filterable per number, and the line a
+                // call used has to come from somewhere in this record. This says where.
+                records.firstOrNull { it.description.startsWith("Outbound") }?.let { record ->
+                    note("cdr-leg ${record.date} ${record.destination} ${record.seconds}s")
+                    for (detail in record.logs.lines().take(12)) {
+                        if (detail.isNotBlank()) note("cdr-log ${detail.trim()}")
+                    }
+                }
             } catch (fault: Exception) {
-                _calls.value = CallsView(error = describe(fault))
+                // The failure is reported over whatever was already known, not instead of it.
+                _calls.value = _calls.value.copy(loading = false, error = describe(fault))
                 note("could not read the call records: ${describe(fault)}")
             }
         }
@@ -437,8 +773,148 @@ class Pathfinder(context: Context) {
      */
     fun prepare(id: String) {
         scope.launch {
-            _provision.value = ProvisionState.Working("reading the sub-account")
+            runCatching { prepareCredentials(id) }
+                .onFailure { fault ->
+                    _provision.value = ProvisionState.Failed(describe(fault))
+                    note("preparation failed: ${describe(fault)}")
+                }
+        }
+    }
+
+    /**
+     * The whole front door in one call.
+     *
+     * The chosen numbers decide which sub-accounts have to be registered, and several can
+     * be live at once because the provider keeps a binding per sub-account. So this
+     * prepares and registers every distinct sub-account the chosen numbers route to, and
+     * stops any line whose number is no longer chosen.
+     */
+    fun answerOnSelected() {
+        scope.launch {
             try {
+                val wanted = settings.selectedDids
+                // An empty selection is a decision, not an error: it means answer nothing,
+                // so every binding is released rather than a complaint about the tap.
+                if (wanted.isEmpty()) {
+                    stopAnswering()
+                    return@launch
+                }
+                _provision.value = ProvisionState.Working("checking the numbers")
+                if (_accounts.value.isEmpty()) _accounts.value = api.subAccounts()
+                if (_dids.value.isEmpty()) {
+                    _dids.value = api.dids()
+                    cacheDids(_dids.value)
+                }
+                val routed = _dids.value
+                    .filter { it.number in wanted }
+                    .mapNotNull { it.routedAccount }
+                    .distinct()
+                if (routed.isEmpty()) {
+                    throw SipFault("none of the chosen numbers routes to a sub-account")
+                }
+                val subs = routed.mapNotNull { name ->
+                    _accounts.value.firstOrNull { it.account.equals(name, ignoreCase = true) }
+                }
+                if (subs.isEmpty()) throw SipFault("none of those sub-accounts is on the account list")
+
+                val keep = mutableListOf<Line>()
+                // One servers list for the whole run: it is a slow call and it does not
+                // differ per sub-account.
+                val servers = runCatching { api.servers() }.getOrDefault(emptyList())
+                for (sub in subs) {
+                    val existing = _activeLines.value.firstOrNull { it.subId == sub.id }
+                    if (existing != null) {
+                        keep += existing
+                        continue
+                    }
+                    _provision.value = ProvisionState.Working("finding the SIP password")
+                    val credentials = credentialsFor(sub, servers)
+                    _provision.value = ProvisionState.Working("registering")
+                    val line = Line(sub.account, sub.id, credentials) { text -> note(text) }
+                    line.start(scope)
+                    // Reported as the line moves, so the dial page follows a registration
+                    // that lands a few seconds after the tap.
+                    scope.launch {
+                        line.state.collect { publishReadiness() }
+                    }
+                    keep += line
+                }
+                // A binding is a resource, so a line whose number is no longer chosen is
+                // stopped rather than left registered for nobody.
+                _activeLines.value.filterNot { it in keep }.forEach { it.stop() }
+                _activeLines.value = keep
+                publishReadiness()
+                PathfinderService.start(appContext)
+                settings.numbersConfirmed = true
+                note("answering ${wanted.size} number(s) on ${keep.size} sub-account(s)")
+                // The selection can change while this runs, in which case what was
+                // registered is no longer what is chosen. Reconcile once more rather than
+                // leaving a line up for a number nobody picked.
+                if (settings.selectedDids != wanted) {
+                    note("the chosen numbers changed during registration; reconciling")
+                    answerOnSelected()
+                }
+                _provision.value = ProvisionState.Idle
+            } catch (fault: Exception) {
+                _starting.value = false
+                _provision.value = ProvisionState.Failed(describe(fault))
+                note("could not start answering: ${describe(fault)}")
+            }
+        }
+    }
+
+    /** Stops every line, leaving the account exactly as it was. */
+    fun stopAnswering() {
+        _activeLines.value.forEach { it.stop() }
+        _activeLines.value = emptyList()
+        publishReadiness()
+        PathfinderService.stop(appContext)
+        note("stopped answering; every registration was released")
+    }
+
+    /**
+     * Credentials for one sub-account, without disturbing the probe's prepared state.
+     *
+     * The password may have to be generated and written back, which is the one write with
+     * consequences outside this phone, so the value is verified before it is used. The
+     * server comes from the provider's own registration status first and from the POP it
+     * recommends second, as everywhere else.
+     */
+    private suspend fun credentialsFor(sub: SubAccount, servers: List<ServerPop>): SipCredentials {
+        var working = sub
+        var password = sub.password
+        if (password.isNullOrBlank()) {
+            val fresh = Provisioning.generatePassword()
+            note("the API returned no password for ${sub.account}; writing a generated one")
+            api.setSubAccount(Provisioning.updateParams(sub, fresh))
+            working = api.subAccounts().firstOrNull { it.id == sub.id }
+                ?: throw SipFault("${sub.account} disappeared after the password update")
+            if (working.password != fresh) {
+                throw SipFault("the provider did not keep the generated password for ${sub.account}")
+            }
+            password = fresh
+            note("the generated password was accepted for ${sub.account}")
+        }
+        val known = password.orEmpty().ifEmpty {
+            throw SipFault("no SIP password for ${sub.account}")
+        }
+        // The expiry the app registers with is whatever the account allows. It is
+        // deliberately not adjusted here: a client that edits account limits to suit itself
+        // is a client nobody can reason about, and the one time this mattered was a leftover
+        // from our own test, which belongs in the portal, not in the code.
+        val status = runCatching { api.registrationStatus(working.account) }.getOrNull()
+            ?: RegistrationStatus(false, null, null, null, null)
+        val host = settings.serverOverride.ifBlank {
+            Provisioning.chooseServer(status, servers)
+                ?: throw SipFault("no SIP server could be found for ${sub.account}")
+        }
+        val tls = settings.useTls
+        return Provisioning.credentials(working, known, host, settings.portFor(tls), tls)
+    }
+
+    /** The body of [prepare], suspend and throwing, so a caller can chain a registration. */
+    private suspend fun prepareCredentials(id: String): SipCredentials {
+            _provision.value = ProvisionState.Working("reading the sub-account")
                 val list = api.subAccounts()
                 _accounts.value = list
                 var sub = list.firstOrNull { it.id == id }
@@ -506,11 +982,7 @@ class Pathfinder(context: Context) {
                 if (sub.sipTraffic) {
                     note("sip_traffic is on for this sub-account; plain UDP registration may be refused")
                 }
-            } catch (fault: Exception) {
-                _provision.value = ProvisionState.Failed(describe(fault))
-                note("preparation failed: ${describe(fault)}")
-            }
-        }
+                return result
     }
 
     /**
@@ -663,9 +1135,6 @@ class Pathfinder(context: Context) {
         // is to retype it by hand.
         for (line in text.trimEnd().split("\n")) Log.i(LOGCAT_TAG, "$stamp  $line")
     }
-
-    private fun describe(fault: Throwable): String =
-        fault.message?.takeIf { it.isNotBlank() } ?: fault.javaClass.simpleName
 
     private fun fail(reason: String) {
         note(reason)
@@ -877,152 +1346,6 @@ class Pathfinder(context: Context) {
 
     // --------------------------------------------------------------------------- calls
 
-    private suspend fun invite(credentials: SipCredentials, number: String, mode: OfferMode, rtp: DatagramSocket) {
-        val started = System.currentTimeMillis()
-        val uri = Provider.dialUri(credentials.host, number)
-        val offer = Sdp.offer(
-            System.currentTimeMillis() / 1000,
-            localIp,
-            rtp.localPort,
-            mode,
-            cryptoKey = localCryptoKey,
-        )
-        var authorization: Pair<String, String>? = null
-        var cseqValue = nextCSeq()
-        var attempt = 0
-
-        while (attempt < 3) {
-            attempt++
-            val headers = mutableListOf(
-                "Via" to via(branch()),
-                "Max-Forwards" to "70",
-                "From" to "<${Provider.userUri(credentials.host, credentials.username)}>;tag=$fromTag",
-                "To" to "<$uri>",
-                "Call-ID" to callId,
-                "CSeq" to "$cseqValue INVITE",
-                "Contact" to Provider.contactUri(
-                credentials.host,
-                credentials.username,
-                localIp,
-                localSipPort,
-                if (credentials.tls) "tls" else null,
-            ),
-                "Allow" to "INVITE, ACK, CANCEL, BYE, OPTIONS, INFO",
-                "Content-Type" to "application/sdp",
-                "User-Agent" to SipMessage.USER_AGENT,
-            )
-            authorization?.let { headers += it }
-            val request = SipMessage.request("INVITE", uri, headers, offer)
-            currentInvite = request
-
-            val response = transact(request, INVITE_TIMEOUT_MILLIS) { provisional(number, it) }
-            if (response == null) {
-                sendCancelFor(request)
-                throw SipFault("no answer to INVITE after ${INVITE_TIMEOUT_MILLIS / 1000} s")
-            }
-            val status = response.start.status ?: throw SipFault("malformed response to INVITE")
-
-            if (status == 200) {
-                _answers.update { it.copy(inviteMillis = System.currentTimeMillis() - started) }
-                ack(request, response, non2xx = false)
-                startMedia(number, response, mode, rtp)
-                return
-            }
-            if (status !in 300..699) {
-                ack(request, response, non2xx = false)
-                throw SipFault("INVITE answered $status ${response.start.reason}")
-            }
-
-            // Everything from 300 up is acknowledged the same way, including the
-            // challenge that is about to be answered and retried.
-            ack(request, response, non2xx = true)
-            if (status == 401 || status == 407) {
-                val challengeName = if (status == 401) "WWW-Authenticate" else "Proxy-Authenticate"
-                val headerName = if (status == 401) "Authorization" else "Proxy-Authorization"
-                val value = response.header(challengeName)
-                    ?: throw SipFault("$status without a $challengeName header")
-                val challenge = Digest.parse(value)
-                    ?: throw SipFault("$challengeName is not Digest: ${value.take(48)}")
-                authorization = headerName to Digest.authorization(
-                    challenge = challenge,
-                    username = credentials.username,
-                    password = credentials.password,
-                    method = "INVITE",
-                    uri = uri,
-                    cnonce = randomHex(8),
-                )
-                cseqValue = nextCSeq()
-                note("$status to INVITE, retrying with $headerName")
-                continue
-            }
-            throw SipFault("INVITE answered $status ${response.start.reason}")
-        }
-        throw SipFault("gave up after repeated INVITE challenges")
-    }
-
-    private fun provisional(number: String, message: SipMessage) {
-        when (val status = message.start.status ?: return) {
-            100 -> _state.value = PathState.Dialing(number)
-            180, 183 -> {
-                _state.value = PathState.Ringing(number)
-                note("ringing ($status)")
-                val early = Sdp.parse(message.body)
-                if (early != null) {
-                    note("early media: ${early.protocol} ${early.codec?.encoding ?: "unknown"} at ${early.address}:${early.port}")
-                }
-            }
-            else -> note("provisional $status")
-        }
-    }
-
-    /**
-     * ACK, whose branch rules are opposite in the two cases and both mandatory: a
-     * non-2xx ACK reuses the INVITE's branch, a 2xx ACK is a new transaction with its
-     * own. Getting this backwards produces a retransmitted 200 and, eventually, a BYE.
-     */
-    private fun ack(invite: SipMessage, response: SipMessage, non2xx: Boolean) {
-        val inviteCseq = SipMessage.cseqOf(invite) ?: return
-        val inviteBranch = SipMessage.branchOf(invite.allHeaders("Via").firstOrNull().orEmpty())
-        val target = if (non2xx) {
-            invite.start.uri ?: return
-        } else {
-            response.header("Contact")?.let { bracket(it) } ?: (invite.start.uri ?: return)
-        }
-        val headers = listOf(
-            "Via" to via(if (non2xx) inviteBranch ?: branch() else branch()),
-            "Max-Forwards" to "70",
-            "From" to (invite.header("From") ?: return),
-            "To" to (response.header("To") ?: invite.header("To") ?: return),
-            "Call-ID" to (invite.header("Call-ID") ?: return),
-            "CSeq" to "${inviteCseq.first} ACK",
-            "User-Agent" to SipMessage.USER_AGENT,
-        )
-        send(SipMessage.request("ACK", target, headers))
-    }
-
-    private fun sendCancelFor(invite: SipMessage) {
-        val cseq = SipMessage.cseqOf(invite) ?: return
-        val inviteBranch = SipMessage.branchOf(invite.allHeaders("Via").firstOrNull().orEmpty()) ?: return
-        val headers = listOf(
-            "Via" to via(inviteBranch),
-            "Max-Forwards" to "70",
-            "From" to (invite.header("From") ?: return),
-            "To" to (invite.header("To") ?: return),
-            "Call-ID" to (invite.header("Call-ID") ?: return),
-            "CSeq" to "${cseq.first} CANCEL",
-            "User-Agent" to SipMessage.USER_AGENT,
-        )
-        send(SipMessage.request("CANCEL", invite.start.uri ?: return, headers))
-        note("CANCEL sent")
-    }
-
-    /** The URI inside a Contact header, which may carry a name and parameters. */
-    private fun bracket(value: String): String {
-        val open = value.indexOf('<')
-        val close = value.indexOf('>', open + 1)
-        return if (open >= 0 && close > open) value.substring(open + 1, close) else value.trim()
-    }
-
     // --------------------------------------------------------------------------- media
 
     /**
@@ -1037,247 +1360,6 @@ class Pathfinder(context: Context) {
      * 2. PCMU in the clear, or another codec, both unreachable for now. They stay because
      *    they are what a call looks like once SRTP lands and the audio path matters again.
      */
-    private fun startMedia(number: String, response: SipMessage, mode: OfferMode, rtp: DatagramSocket) {
-        val answer = Sdp.parse(response.body)
-            ?: throw SipFault("the 200 OK has no usable SDP: ${response.body.replace("\r\n", " ").take(80)}")
-        val codec = answer.codec
-        val name = codec?.let { "${it.encoding}/${it.clockRate}" } ?: "unknown"
-
-        _answers.update {
-            it.copy(
-                protocol = answer.protocol,
-                encrypted = answer.encrypted,
-                cryptoLines = answer.crypto.size,
-                negotiated = name,
-                payloadTypes = answer.payloadTypes.joinToString(" "),
-                ptime = answer.ptime,
-                remoteMedia = "${answer.address ?: "?"}:${answer.port}",
-            )
-        }
-        note("answer: ${answer.protocol}, $name, payloads ${answer.payloadTypes.joinToString(",")}, ptime ${answer.ptime ?: "-"}")
-        note("remote media ${answer.address}:${answer.port}, local RTP ${rtp.localPort}")
-
-        val address = answer.address ?: throw SipFault("the SDP answer has no connection address")
-        if (answer.port <= 0) throw SipFault("the SDP answer refuses the audio stream (port ${answer.port})")
-        remoteMedia = InetSocketAddress(InetAddress.getByName(address), answer.port)
-        dialog = Dialog(
-            remoteTarget = response.header("Contact")?.let { bracket(it) }
-                ?: currentInvite?.start?.uri.orEmpty(),
-            from = response.header("From") ?: currentInvite?.header("From").orEmpty(),
-            to = response.header("To").orEmpty(),
-            callId = response.header("Call-ID") ?: callId,
-            cseq = SipMessage.cseqOf(currentInvite ?: response)?.first ?: nextCSeq(),
-        )
-
-        if (answer.encrypted) {
-            // The answer carries its own key in an a=crypto line. Ours was made for this
-            // call, so the two together are a complete SDES exchange and there is nothing
-            // else to fetch.
-            val remote = answer.crypto.firstNotNullOfOrNull { Sdp.inlineKey(it) }
-            val local = Sdp.unbase64(localCryptoKey)
-            if (remote == null || local == null ||
-                remote.size != Srtp.INLINE_BYTES || local.size != Srtp.INLINE_BYTES
-            ) {
-                note(
-                    "OUTCOME: encrypted media (${answer.protocol}) but the key material is not " +
-                        "usable: remote ${remote?.size ?: "none"} bytes, local ${local?.size ?: "none"}",
-                )
-                _state.value = PathState.Connected(number, name, true, audio = false, at = System.currentTimeMillis())
-                return
-            }
-            srtpOut = SrtpContext(SrtpKey.fromInline(local))
-            srtpIn = SrtpContext(SrtpKey.fromInline(remote))
-            note(
-                "SRTP ${Srtp.SUITE}: both keys from SDP, ${Srtp.TAG_BYTES} byte tags, " +
-                    "server chose $name from ${mode.label}",
-            )
-        } else {
-            srtpOut = null
-            srtpIn = null
-            note("OUTCOME: clear media (${answer.protocol}), server chose $name from ${mode.label}")
-        }
-        if (codec?.payloadType != G711.PAYLOAD_TYPE) {
-            note("OUTCOME: the server chose $name, which this build does not decode (offered ${mode.label})")
-            _state.value = PathState.Connected(number, name, false, audio = false, at = System.currentTimeMillis())
-            return
-        }
-
-        val callAudio = CallAudio(appContext) { note(it) }
-        if (!callAudio.start()) {
-            note("the audio stack did not start; RTP will still be counted")
-            _state.value = PathState.Connected(number, name, false, audio = false, at = System.currentTimeMillis())
-            return
-        }
-        audio = callAudio
-        // Start on the speaker. The earpiece is the correct default for a phone call, but
-        // this is a probe held away from the ear while somebody reads a screen, and every
-        // call so far began with the speaker being switched on by hand. The toggle is one
-        // tap away when that changes.
-        setSpeaker(true)
-
-        jitter.reset()
-        ssrc = random.nextInt().toLong() and 0xFFFFFFFFL
-        sequence = randomInt(0, 65535)
-        timestamp = random.nextInt().toLong() and 0xFFFFFFFFL
-        framesSent.set(0)
-        framesReceived.set(0)
-        datagrams.set(0)
-
-        mediaJobs += scope.launch { sendLoop(rtp, callAudio) }
-        mediaJobs += scope.launch { receiveMedia(rtp) }
-        mediaJobs += scope.launch { playoutLoop(callAudio) }
-        statsJob = scope.launch { statsLoop() }
-        _state.value = PathState.Connected(number, name, false, audio = true, at = System.currentTimeMillis())
-        note("call is up; speak")
-    }
-
-    private fun CoroutineScope.sendLoop(rtp: DatagramSocket, callAudio: CallAudio) {
-        val pcm = ShortArray(G711.FRAME_SAMPLES)
-        var first = true
-        while (isActive) {
-            val read = callAudio.readFrame(pcm)
-            if (read <= 0) {
-                note("microphone stopped returning frames ($read)")
-                return
-            }
-            val payload = G711.encode(pcm, read)
-            val packet = Rtp.build(
-                payloadType = G711.PAYLOAD_TYPE,
-                marker = first,
-                sequence = sequence,
-                timestamp = timestamp,
-                ssrc = ssrc,
-                payload = payload,
-            )
-            first = false
-            val target = remoteMedia
-            if (target == null) {
-                note("no remote media address; stopping the send path")
-                return
-            }
-            // Encryption happens after the frame is built and before it reaches the socket,
-            // so the packet this loop reasons about stays the plain one.
-            val wire = srtpOut?.let { context ->
-                try {
-                    context.protect(packet)
-                } catch (fault: Exception) {
-                    if (isActive) note("SRTP could not protect a frame: ${describe(fault)}")
-                    return
-                }
-            } ?: packet
-            try {
-                rtp.send(DatagramPacket(wire, wire.size, target))
-            } catch (fault: Exception) {
-                if (isActive) note("RTP send failed: ${describe(fault)}")
-                return
-            }
-            sequence = Sequence.next(sequence)
-            timestamp = (timestamp + read) and 0xFFFFFFFFL
-            framesSent.incrementAndGet()
-            sendPeak = max(sendPeak, G711.peak(pcm, read))
-        }
-    }
-
-    private fun CoroutineScope.receiveMedia(socket: DatagramSocket) {
-        val buffer = ByteArray(2048)
-        while (isActive) {
-            val packet = DatagramPacket(buffer, buffer.size)
-            try {
-                socket.receive(packet)
-            } catch (fault: Exception) {
-                if (isActive) note("RTP receive stopped: ${describe(fault)}")
-                return
-            }
-            datagrams.incrementAndGet()
-            // RTCP has its own packet format and its own protection, so it is set aside
-            // before any SRTP work rather than being fed through the audio path.
-            //
-            // The whole byte is read, not the seven bit payload type: RTCP types 200 to 204
-            // all have the top bit set, and masking it turns them into 72 to 76, which is
-            // why an earlier version of this check could never match.
-            val rawType = if (packet.length > 1) packet.data[1].toInt() and 0xFF else -1
-            if (rawType in 200..204) {
-                // RTCP arriving is independent proof that the media path is two-way.
-                note("RTCP received: ${packet.length} bytes, packet type $rawType")
-                continue
-            }
-            val context = srtpIn
-            val clear = if (context == null) {
-                packet.data.copyOf(packet.length)
-            } else {
-                context.unprotect(packet.data, packet.length)
-            }
-            if (clear == null) {
-                // The tag is checked before anything is decrypted, so this is a dropped
-                // packet rather than a corrupt one. Noted once, because a stream of them
-                // would flood the log and say nothing new.
-                if (context != null && context.rejected == 1) {
-                    note("an SRTP packet failed authentication and was dropped; later ones stay quiet")
-                }
-                continue
-            }
-            val parsed = Rtp.parse(clear) ?: continue
-            if (parsed.payloadType != G711.PAYLOAD_TYPE) continue
-            if (framesReceived.get() == 0L) {
-                note("first media packet decrypted (${parsed.payload.size} bytes, seq ${parsed.sequence})")
-            }
-            framesReceived.incrementAndGet()
-            jitter.put(parsed.sequence, parsed.payload)
-        }
-    }
-
-    /**
-     * One frame every 20 ms, silence when the buffer has nothing. Writing silence rather
-     * than skipping is what keeps the track's clock honest: a skipped write becomes an
-     * underrun, and an underrun is audible as a click even when the next packet is on
-     * time.
-     */
-    private suspend fun CoroutineScope.playoutLoop(callAudio: CallAudio) {
-        val silence = ShortArray(G711.FRAME_SAMPLES)
-        var next = System.nanoTime()
-        while (isActive) {
-            next += G711.FRAME_MILLIS * 1_000_000L
-            val payload = jitter.poll()
-            if (payload == null) {
-                callAudio.write(silence, silence.size)
-            } else {
-                val pcm = G711.decode(payload)
-                callAudio.write(pcm, pcm.size)
-                receivePeak = max(receivePeak, G711.peak(pcm, pcm.size))
-            }
-            val wait = next - System.nanoTime()
-            if (wait > 0) {
-                delay(wait / 1_000_000L)
-            } else if (wait < -200_000_000L) {
-                next = System.nanoTime() // badly behind, do not try to catch up in a burst
-            }
-        }
-    }
-
-    private suspend fun CoroutineScope.statsLoop() {
-        while (isActive) {
-            delay(STATS_MILLIS)
-            val counters = jitter.counters()
-            _stats.value = MediaStats(
-                framesSent = framesSent.get(),
-                framesReceived = framesReceived.get(),
-                lost = counters.lost,
-                duplicates = counters.duplicates,
-                late = counters.late,
-                reordered = counters.reordered,
-                held = counters.held,
-                sendLevel = sendPeak,
-                receiveLevel = receivePeak,
-                localRtpPort = rtpSocket?.localPort ?: 0,
-                remoteMedia = remoteMedia?.let { "${it.address.hostAddress}:${it.port}" }.orEmpty(),
-                echoCancelled = audio?.echoCancelled ?: false,
-                speaker = audio?.speaker ?: false,
-            )
-            sendPeak = 0f
-            receivePeak = 0f
-        }
-    }
-
     // ------------------------------------------------------------------- registration
 
     private fun requestRegister(
@@ -1459,90 +1541,13 @@ class Pathfinder(context: Context) {
      * that hangs on a lost BYE is worse than one that leaves a stale dialog at the far
      * end, which the provider's own timeout clears.
      */
-    private suspend fun bye() {
-        val current = dialog
-        if (current == null) {
-            endCall("no confirmed dialog to end", failed = false)
-            return
-        }
-        var cseqValue = ++current.cseq
-        var authorization: Pair<String, String>? = null
-        for (attempt in 0 until 2) {
-            val headers = mutableListOf(
-                "Via" to via(branch()),
-                "Max-Forwards" to "70",
-                "From" to current.from,
-                "To" to current.to,
-                "Call-ID" to current.callId,
-                "CSeq" to "$cseqValue BYE",
-                "User-Agent" to SipMessage.USER_AGENT,
-            )
-            authorization?.let { headers += it }
-            val request = SipMessage.request("BYE", current.remoteTarget, headers)
-            val response = transact(request, BYE_TIMEOUT_MILLIS)
-            if (response == null) {
-                note("no answer to BYE")
-                break
-            }
-            when (val status = response.start.status ?: 0) {
-                200 -> {
-                    note("call ended by BYE")
-                    break
-                }
-                401, 407 -> {
-                    val challengeName = if (status == 401) "WWW-Authenticate" else "Proxy-Authenticate"
-                    val headerName = if (status == 401) "Authorization" else "Proxy-Authorization"
-                    val challenge = response.header(challengeName)?.let { Digest.parse(it) }
-                    if (challenge == null) {
-                        note("BYE challenged without a usable $challengeName")
-                        break
-                    }
-                    val known = credentials
-                    authorization = headerName to Digest.authorization(
-                        challenge = challenge,
-                        username = known?.username.orEmpty(),
-                        password = known?.password.orEmpty(),
-                        method = "BYE",
-                        uri = current.remoteTarget,
-                        cnonce = randomHex(8),
-                    )
-                    cseqValue = ++current.cseq
-                    if (attempt == 1) note("BYE kept its challenge; ending locally anyway")
-                }
-                else -> {
-                    note("BYE answered $status ${response.start.reason}")
-                    break
-                }
-            }
-        }
-        endCall("hung up", failed = false)
-    }
-
-    private fun cancelInvite() {
-        currentInvite?.let { sendCancelFor(it) }
-        endCall("canceled", failed = false)
-    }
-
     private fun endCall(reason: String, failed: Boolean) {
         // The counters belong in the log, not only in the report file: a run on a secondary
         // Android user cannot be read over adb from its files, and logcat is the channel
         // that works from every profile.
-        note(
-            "media totals: ${framesSent.get()} sent, ${framesReceived.get()} received, " +
-                "${datagrams.get()} datagrams, ${srtpIn?.rejected ?: 0} srtp rejected",
-        )
-        mediaJobs.forEach { it.cancel() }
-        mediaJobs.clear()
-        statsJob?.cancel()
-        statsJob = null
-        audio?.stop()
-        audio = null
-        rtpSocket?.close()
-        rtpSocket = null
-        remoteMedia = null
+        outbound?.let { note("media totals: ${it.mediaStats.value.framesSent} sent, ${it.mediaStats.value.framesReceived} received") }
         currentInvite = null
         dialog = null
-        jitter.reset()
         if (reason.isNotEmpty()) note(reason)
         _state.value = if (failed) PathState.Failed(reason) else PathState.Ended(reason)
     }
@@ -1588,7 +1593,7 @@ class Pathfinder(context: Context) {
      */
     fun report(): String {
         val answers = _answers.value
-        val stats = _stats.value
+        val counters = stats.value
         val detail = (_provision.value as? ProvisionState.Ready)?.detail
         val prepared = prepared
         val builder = StringBuilder()
@@ -1640,7 +1645,7 @@ class Pathfinder(context: Context) {
             },
         )
         line(
-            "srtp: " + if (srtpIn != null) {
+            "srtp: " + if (outbound?.encrypted == true) {
                 "${Srtp.SUITE}, ${Srtp.TAG_BYTES} byte tags, decrypting both ways"
             } else {
                 "not in use"
@@ -1654,16 +1659,16 @@ class Pathfinder(context: Context) {
         line("INVITE to 200 OK: ${if (answers.inviteMillis >= 0) "${answers.inviteMillis} ms" else "-"}")
         line("incoming INVITEs seen: ${answers.incomingInvites}")
         line(
-            "media: ${stats.framesSent} sent, ${stats.framesReceived} received, " +
-                "${stats.lost} lost, ${stats.late} late, ${stats.duplicates} duplicated, " +
-                "${stats.reordered} reordered",
+            "media: ${counters.framesSent} sent, ${counters.framesReceived} received, " +
+                "${counters.lost} lost, ${counters.late} late, ${counters.duplicates} duplicated, " +
+                "${counters.reordered} reordered",
         )
         // Datagrams and rejections are what tell "the far end sent nothing" apart from
         // "packets arrived and we refused them". Without both, silence is unattributable.
         line(
-            "rtp datagrams: ${datagrams.get()}, srtp rejected: ${srtpIn?.rejected ?: 0}",
+            "rtp datagrams: ${outbound?.receivedDatagrams ?: 0}, srtp rejected: ${outbound?.rejected ?: 0}",
         )
-        line("audio: ${if (stats.echoCancelled) "echo cancellation on" else "echo cancellation off"}")
+        line("audio: ${if (counters.echoCancelled) "echo cancellation on" else "echo cancellation off"}")
 
         val records = _calls.value.records
         if (records.isNotEmpty()) {
@@ -1690,6 +1695,17 @@ class Pathfinder(context: Context) {
         is PathState.Failed -> "failed: ${state.reason}"
     }
 
+    /**
+     * The saved lists are read here, at the end of the class, because Kotlin runs
+     * initializers in declaration order: from above these fields it read nulls, which is
+     * how a restore threw and an app crashed on the IO dispatcher.
+     */
+    init {
+        restoreDids()
+        restoreCalls()
+        publishReadiness()
+    }
+
     private companion object {
         const val MAX_LOG_LINES = 600
         const val FIRST_RETRANSMIT_MILLIS = 500L
@@ -1711,7 +1727,6 @@ class Pathfinder(context: Context) {
         const val STATS_MILLIS = 250L
         const val KEEPALIVE_MILLIS = 25_000L
         const val DAY_MILLIS = 24L * 60 * 60 * 1000
-        const val CALL_RECORDS_SHOWN = 8
     }
 }
 

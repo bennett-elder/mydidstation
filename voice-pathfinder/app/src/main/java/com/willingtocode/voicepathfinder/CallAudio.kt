@@ -35,24 +35,24 @@ import android.os.Build
 internal class CallAudio(
     private val context: Context,
     private val log: (String) -> Unit,
-) {
+) : CallAudioPort {
 
     private var record: AudioRecord? = null
     private var track: AudioTrack? = null
     private var echo: AcousticEchoCanceler? = null
     private var manager: AudioManager? = null
 
-    var echoCancelled: Boolean = false
+    override var echoCancelled: Boolean = false
         private set
 
     /** Starts on the speaker: this probe is read off a screen, not held to an ear. */
-    var speaker: Boolean = true
+    override var speaker: Boolean = true
         private set
 
     var started: Boolean = false
         private set
 
-    fun start(): Boolean {
+    override fun start(): Boolean {
         if (started) return true
 
         val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
@@ -154,7 +154,7 @@ internal class CallAudio(
     }
 
     /** Blocking read of at most one frame. Returns samples read, or a negative value. */
-    fun readFrame(buffer: ShortArray): Int {
+    override fun readFrame(buffer: ShortArray): Int {
         val recorder = record ?: return -1
         return try {
             recorder.read(buffer, 0, minOf(buffer.size, G711.FRAME_SAMPLES))
@@ -165,7 +165,7 @@ internal class CallAudio(
     }
 
     /** Blocking write. The track's buffer is what absorbs a late frame. */
-    fun write(samples: ShortArray, count: Int) {
+    override fun write(samples: ShortArray, count: Int) {
         val player = track ?: return
         try {
             player.write(samples, 0, count)
@@ -189,7 +189,9 @@ internal class CallAudio(
         }
     }
 
-    fun stop() {
+    override fun useSpeaker(on: Boolean) = setSpeaker(on)
+
+    override fun stop() {
         runCatching { record?.stop() }
         record?.release()
         record = null
