@@ -137,7 +137,17 @@ data class Did(
         get() = routing.substringAfter("account:", "").takeIf { routing.startsWith("account:") && it.isNotBlank() }
 }
 
-class VoipMs(private val settings: ApiSettings) {
+class VoipMs(
+    private val settings: ApiSettings,
+    /**
+     * Where a slow call says so.
+     *
+     * The gap between "restoring the chosen numbers" and the first REGISTER is 16 s on one
+     * profile sign-in and 26 s on another, and nothing in that path reported its duration, so
+     * the difference could not be attributed to the provider or to the phone being idle.
+     */
+    private val log: (String) -> Unit = {},
+) {
 
     /**
      * Reads are capped generously on purpose.
@@ -302,6 +312,20 @@ class VoipMs(private val settings: ApiSettings) {
         client: OkHttpClient,
         method: String,
         vararg params: Pair<String, String>,
+    ): JSONObject =
+        withContext(Dispatchers.IO) {
+            val startedAt = System.currentTimeMillis()
+            try {
+                callTimed(client, method, params)
+            } finally {
+                log("$method took ${System.currentTimeMillis() - startedAt} ms")
+            }
+        }
+
+    private suspend fun callTimed(
+        client: OkHttpClient,
+        method: String,
+        params: Array<out Pair<String, String>>,
     ): JSONObject =
         withContext(Dispatchers.IO) {
             val credentials = settings.credentials() ?: throw IllegalStateException("Not configured")

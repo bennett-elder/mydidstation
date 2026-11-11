@@ -55,6 +55,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -1461,6 +1462,9 @@ private fun SettingsPage(
                     enabled = working == null && !fetching,
                 ) { Text("Select none") }
             }
+            // A line kept alive by a foreground service does not survive Doze. Saying which
+            // state the device is in is the difference between a phone that answers at night
+            // and one that quietly stops and blames the provider.
             if (selected != saved) {
                 Button(
                     onClick = { pathfinder.answerOnSelected() },
@@ -1469,6 +1473,44 @@ private fun SettingsPage(
                 ) { Text("Apply changes") }
             }
         }
+        // Its own section rather than the tail of the number list: with four numbers the row
+        // sat past the fold, and a state nobody scrolls to is a state nobody knows. Named
+        // "Battery" because that is the word somebody looks for when a line goes quiet.
+        Section(
+            "Battery",
+            "A registered line is held open by this app, and Android may idle it. That looks like " +
+                "nothing until a call goes to voicemail while the screen says everything is fine.",
+        ) {
+            // Polled rather than read once: the grant happens in a system dialog, and nothing
+            // in this screen recomposes when that dialog closes, so a single read would leave
+            // the row claiming the phone may idle an app that was just exempted.
+            val unrestricted by produceState(Battery.unrestricted(context)) {
+                while (true) {
+                    value = Battery.unrestricted(context)
+                    delay(2_000)
+                }
+            }
+            Detail(
+                "battery",
+                if (unrestricted) {
+                    "unrestricted, so the line can be kept up while the phone idles"
+                } else {
+                    "the system may idle this app, and a line that idles stops answering"
+                },
+            )
+            if (unrestricted) {
+                // Removal has no API. This opens the list the system keeps, so undoing it is
+                // one tap from here rather than a walk through app info.
+                TextButton(onClick = { Battery.openSettings(context) }) {
+                    Text("Change it in Android's battery settings")
+                }
+            } else {
+                TextButton(onClick = { Battery.ask(context) }) {
+                    Text("Allow it to keep the line up")
+                }
+            }
+        }
+
         Section(
             "Account",
             "The API password is the only stored secret, sealed with this device's Keystore.",

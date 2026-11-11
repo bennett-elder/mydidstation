@@ -154,7 +154,7 @@ class Pathfinder(
 
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val api = VoipMs(settings)
+    private val api = VoipMs(settings, ::note)
     private val random = SecureRandom()
     private val cseqLock = Any()
 

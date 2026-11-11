@@ -58,6 +58,9 @@ internal class Line(
 
     /** Chosen to be under the ring delay that used to follow a lost answer. */
     private val RESEND_MILLIS = 600L
+
+    /** Long enough that a network flap does not turn into a registration storm. */
+    private val RESTART_DELAY_MILLIS = 2_000L
     private var localIp = ""
     private var callId = ""
     private var fromTag = ""
@@ -232,10 +235,38 @@ internal class Line(
         keepalive = scope.launch {
             while (isActive) {
                 delay(KEEPALIVE_MILLIS)
-                runCatching {
+                val writeFailed = runCatching {
                     if (created is TlsLink) created.keepalive() else created.send(KEEPALIVE_PING, null)
-                }
+                }.isFailure
+                // A write that fails means the socket is gone, and the provider is still holding
+                // the contact it was registered with. That is the honest signal, and it was
+                // ignored here for weeks: this `runCatching` had no `else`.
+                //
+                // A LAN address change is deliberately not a trigger. The provider never talks
+                // to the private address in our Contact; it uses the public endpoint the
+                // registration came from. Moving between two private addresses means nothing
+                // to it, and treating it as stale would re-register on every DHCP renewal.
+                if (!writeFailed) continue
+                log("$account: the socket to ${credentials.host} went quiet, so the line is registering again")
+                restart()
+                return@launch
             }
+        }
+    }
+
+    /**
+     * Throws this attempt away and registers again.
+     *
+     * Launched rather than done inline: it runs from the keepalive job, which `close()` cancels,
+     * and a cancelled coroutine must not be the one that starts its replacement.
+     */
+    private fun restart() {
+        val scope = scope ?: return
+        state.value = LineState.Preparing("reconnecting")
+        scope.launch {
+            delay(RESTART_DELAY_MILLIS)
+            runCatching { close() }
+            start(scope)
         }
     }
 
@@ -355,3 +386,4 @@ internal class Line(
         const val MIN_REFRESH_MILLIS = 30_000L
     }
 }
+

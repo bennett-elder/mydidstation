@@ -123,6 +123,10 @@ class PathfinderService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
         pathfinder.warn("foreground service started; the registration now outlives the screen")
+        // A service that keeps nothing alive is a service that does nothing. The lines are only
+        // ever restored by this call, and until it was made here a restart produced a running
+        // service, a registered-looking notification, and no registration at all.
+        pathfinder.startIfConfigured()
         watch()
         // Re-read the account while the service runs. Without this, a number added or
         // re-routed in the portal stays invisible until the app is next launched, which is
@@ -133,6 +137,9 @@ class PathfinderService : Service() {
             while (isActive) {
                 delay(ACCOUNT_REFRESH_MILLIS)
                 pathfinder.refreshAccount()
+                // On a cold boot the saved number list can arrive after the first attempt, and
+                // this is idempotent: it returns at once when the lines are already up.
+                pathfinder.startIfConfigured()
             }
         }
         // Sticky on purpose: after a low-memory kill the registration is worth restoring
