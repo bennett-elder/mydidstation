@@ -104,7 +104,30 @@ class PathfinderSettings(
     }
 
     fun clearApi() {
-        prefs.edit().remove(KEY_API).apply()
+        prefs.edit().remove(KEY_API).remove(KEY_SIP_CACHE).apply()
+    }
+
+    /**
+     * The per-line SIP credentials, sealed, so a boot can register without the provider.
+     *
+     * `SecretBox` already holds one key for the whole app, so this costs nothing but a
+     * purpose string: no new Keystore entry, no second key to rotate. It is written only
+     * after a successful read of the account, and cleared when the account is signed out.
+     */
+    fun saveSipCache(payload: String) {
+        prefs.edit().putString(KEY_SIP_CACHE, box.seal(PURPOSE_SIP, payload)).commit()
+    }
+
+    fun sipCache(): String? {
+        val sealed = prefs.getString(KEY_SIP_CACHE, null) ?: return null
+        return when (val opened = box.open(PURPOSE_SIP, sealed)) {
+            is Unsealed.Ok -> opened.value
+            Unsealed.Missing, Unsealed.Unavailable -> null
+            Unsealed.Unreadable -> {
+                prefs.edit().remove(KEY_SIP_CACHE).apply()
+                null
+            }
+        }
     }
 
     override fun endpoint(): String =
@@ -264,6 +287,11 @@ class PathfinderSettings(
 
         /** Authenticated alongside the blob, so it cannot be opened as some other value. */
         const val PURPOSE = "voipms_api"
+
+        /** A separate purpose, so a blob sealed for one cannot be opened as the other. */
+        const val PURPOSE_SIP = "sip_lines"
+
+        const val KEY_SIP_CACHE = "sip_lines"
 
         const val KEY_API = "api"
         const val FIELD_EMAIL = "email"

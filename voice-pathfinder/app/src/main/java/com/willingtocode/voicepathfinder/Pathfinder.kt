@@ -25,6 +25,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -1113,6 +1116,107 @@ class Pathfinder(
             .map { it.number }
     }
 
+    /** One line at a time may be (re)started, so a line never gets two connections. */
+    private val lineLock = Mutex()
+
+    /** Guards the one-off re-read after the provider refuses a cached password. */
+    private val reprovisioning = AtomicBoolean(false)
+
+    private data class CachedLine(val account: String, val subId: String, val credentials: SipCredentials)
+
+    /** The credentials as the last successful read found them, sealed on disk. */
+    private fun writeSipCache(lines: List<Line>) {
+        val array = JSONArray()
+        for (line in lines) {
+            val c = line.credentials
+            array.put(
+                JSONObject()
+                    .put("account", line.account)
+                    .put("subId", line.subId)
+                    .put("host", c.host)
+                    .put("port", c.port)
+                    .put("username", c.username)
+                    .put("password", c.password)
+                    .put("expires", c.expiresSeconds)
+                    .put("label", c.label)
+                    .put("codecs", c.codecs)
+                    .put("tls", c.tls),
+            )
+        }
+        settings.saveSipCache(array.toString())
+    }
+
+    private fun readSipCache(): List<CachedLine> {
+        val raw = settings.sipCache() ?: return emptyList()
+        return runCatching {
+            val array = JSONArray(raw)
+            (0 until array.length()).mapNotNull { index ->
+                val row = array.optJSONObject(index) ?: return@mapNotNull null
+                val account = row.optString("account")
+                val password = row.optString("password")
+                if (account.isBlank() || password.isBlank()) return@mapNotNull null
+                CachedLine(
+                    account = account,
+                    subId = row.optString("subId"),
+                    credentials = SipCredentials(
+                        host = row.optString("host"),
+                        port = row.optInt("port"),
+                        username = row.optString("username"),
+                        password = password,
+                        expiresSeconds = row.optInt("expires", 3600),
+                        label = row.optString("label"),
+                        codecs = row.optString("codecs"),
+                        tls = row.optBoolean("tls", true),
+                    ),
+                )
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    /**
+     * Starts the saved lines without asking the provider for anything.
+     *
+     * This is the whole point of the cache: the measured cost of a cold start was 16 to 26
+     * seconds of HTTPS before the first REGISTER, and a call arriving in that window went to
+     * voicemail. The account is read afterwards, off the critical path.
+     */
+    private fun startFromCache(cached: List<CachedLine>): Boolean {
+        if (cached.isEmpty() || _activeLines.value.isNotEmpty()) return false
+        val lines = cached.map { entry -> startLine(entry.account, entry.subId, entry.credentials) }
+        _activeLines.value = lines
+        publishReadiness()
+        PathfinderService.start(appContext)
+        note("registering ${lines.size} line(s) from the saved credentials")
+        return true
+    }
+
+    private fun sameCredentials(a: SipCredentials, b: SipCredentials): Boolean =
+        a.host == b.host && a.port == b.port && a.username == b.username &&
+            a.password == b.password && a.tls == b.tls
+
+    private fun startLine(account: String, subId: String, credentials: SipCredentials): Line {
+        val line = Line(account, subId, credentials) { text -> note(text) }
+        line.onRequest = { message -> onLineRequest(line, message) }
+        line.start(scope)
+        scope.launch {
+            line.state.collect { state ->
+                publishReadiness()
+                // A saved password the provider refuses is stale, not fatal: read the account
+                // once and try again. Any other failure is reported as it always was.
+                val failure = state as? LineState.Failed ?: return@collect
+                val refused = failure.reason.contains("401") || failure.reason.contains("403")
+                if (!refused || !reprovisioning.compareAndSet(false, true)) return@collect
+                note("${line.account}: the saved credentials were refused, reading the account again")
+                scope.launch {
+                    delay(2_000)
+                    runCatching { answerOnSelected() }
+                    reprovisioning.set(false)
+                }
+            }
+        }
+        return line
+    }
+
     /** Re-registers the chosen numbers after a restart, because a phone should not need a tap. */
     fun startIfConfigured() {
         // "Nothing to restore" is not "starting". Leaving the flag set put a modal loading
@@ -1121,6 +1225,12 @@ class Pathfinder(
         if (!settings.numbersConfirmed || settings.selectedDids.isEmpty() ||
             _activeLines.value.isNotEmpty()
         ) {
+            _starting.value = false
+            return
+        }
+        // Saved credentials first: no provider call in this path at all, which is the
+        // difference between answering in a second and answering after twenty.
+        if (startFromCache(readSipCache())) {
             _starting.value = false
             return
         }
@@ -1327,30 +1437,31 @@ class Pathfinder(
                 // differ per sub-account.
                 val servers = runCatching { api.servers() }.getOrDefault(emptyList())
                 for (sub in subs) {
-                    val existing = _activeLines.value.firstOrNull { it.subId == sub.id }
-                    if (existing != null) {
-                        keep += existing
-                        continue
-                    }
                     _provision.value = ProvisionState.Working("finding the SIP password")
                     val credentials = credentialsFor(sub, servers)
-                    _provision.value = ProvisionState.Working("registering")
-                    val line = Line(sub.account, sub.id, credentials) { text -> note(text) }
-                    // One place decides what an arriving request means. The line owns the
-                    // socket and the dialog tags; choosing to ring is not its business.
-                    line.onRequest = { message -> onLineRequest(line, message) }
-                    line.start(scope)
-                    // Reported as the line moves, so the dial page follows a registration
-                    // that lands a few seconds after the tap.
-                    scope.launch {
-                        line.state.collect { publishReadiness() }
+                    val existing = _activeLines.value.firstOrNull { it.subId == sub.id }
+                    if (existing != null) {
+                        // Reconciliation: only a line whose credentials actually moved is
+                        // restarted, and never while another start is in flight for it.
+                        if (sameCredentials(existing.credentials, credentials)) {
+                            keep += existing
+                        } else {
+                            note("${sub.account}: the account's credentials changed, re-registering")
+                            lineLock.withLock {
+                                existing.stop()
+                                keep += startLine(sub.account, sub.id, credentials)
+                            }
+                        }
+                        continue
                     }
-                    keep += line
+                    _provision.value = ProvisionState.Working("registering")
+                    keep += lineLock.withLock { startLine(sub.account, sub.id, credentials) }
                 }
                 // A binding is a resource, so a line whose number is no longer chosen is
                 // stopped rather than left registered for nobody.
                 _activeLines.value.filterNot { it in keep }.forEach { it.stop() }
                 _activeLines.value = keep
+                writeSipCache(keep)
                 publishReadiness()
                 PathfinderService.start(appContext)
                 settings.numbersConfirmed = true
