@@ -17,21 +17,21 @@ class LineStandingTest {
     fun a_grant_says_what_is_left_of_it() {
         val now = 1_000_000L
         val state = LineState.Registered(grantedSeconds = 3600, atMillis = now - 60_000)
-        val text = lineStanding(state, "TLS", "tampa1.voip.ms", now)
-        assertTrue(text, text.contains("TLS to tampa1.voip.ms"))
+        val text = lineStanding(state, "TLS", "pop.example.net", now)
+        assertTrue(text, text.contains("TLS to pop.example.net"))
         assertTrue(text, text.contains("59 min"))
     }
 
     @Test
     fun a_failure_says_why_rather_than_that_it_failed() {
-        val text = lineStanding(LineState.Failed("no answer to REGISTER"), "TLS", "tampa1.voip.ms")
+        val text = lineStanding(LineState.Failed("no answer to REGISTER"), "TLS", "pop.example.net")
         assertEquals("Not registered: no answer to REGISTER", text)
     }
 
     @Test
     fun a_line_that_is_working_says_what_it_is_doing() {
-        val text = lineStanding(LineState.Preparing("opening TLS to tampa1.voip.ms"), "", "")
-        assertEquals("Registering: opening TLS to tampa1.voip.ms", text)
+        val text = lineStanding(LineState.Preparing("opening TLS to pop.example.net"), "", "")
+        assertEquals("Registering: opening TLS to pop.example.net", text)
     }
 
     @Test

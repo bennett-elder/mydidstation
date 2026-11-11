@@ -15,8 +15,8 @@ class AgreementLabelTest {
 
     @Test
     fun agreement_names_who_is_answering_and_where() {
-        val text = agreementLabel(Pathfinder.Agreement.Agrees("tampa1.voip.ms", "TLS"))
-        assertEquals("provider agrees (TLS, tampa1.voip.ms)", text)
+        val text = agreementLabel(Pathfinder.Agreement.Agrees("pop.example.net", "TLS"))
+        assertEquals("provider agrees (TLS, pop.example.net)", text)
     }
 
     @Test
@@ -33,7 +33,7 @@ class AgreementLabelTest {
 
     @Test
     fun only_agreement_is_green() {
-        val green = agreementColor(Pathfinder.Agreement.Agrees("tampa1.voip.ms", "TLS"))
+        val green = agreementColor(Pathfinder.Agreement.Agrees("pop.example.net", "TLS"))
         val red = agreementColor(Pathfinder.Agreement.Disagrees("no binding"))
         val amber = agreementColor(Pathfinder.Agreement.Checking)
         assertTrue(green != red && green != amber && red != amber)
