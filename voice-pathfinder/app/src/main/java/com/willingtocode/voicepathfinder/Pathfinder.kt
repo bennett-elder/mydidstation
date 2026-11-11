@@ -2239,6 +2239,31 @@ class Pathfinder(
         restoreDids()
         restoreCalls()
         publishReadiness()
+        // The foreground type follows the call, because a call in the background needs the
+        // microphone and registration does not. Both calls are idempotent, so a state that
+        // repeats costs one intent and no change.
+        scope.launch {
+            var last = "idle"
+            _call.collect { state ->
+                val kind = when (state) {
+                    is PathState.Dialing -> "dialing"
+                    is PathState.Ringing -> "ringing"
+                    is PathState.Connected -> "connected"
+                    else -> "idle"
+                }
+                if (kind == last) return@collect
+                last = kind
+                // Asking on every transition, not just the first, is what gives an inbound
+                // call its microphone type. While ringing on a locked phone the app is not in
+                // a while-in-use state and gets refused; by the time the call is connected the
+                // screen is up, so the second ask can succeed.
+                if (kind == "idle") {
+                    PathfinderService.demote(appContext)
+                } else {
+                    PathfinderService.promote(appContext)
+                }
+            }
+        }
     }
 
     private companion object {

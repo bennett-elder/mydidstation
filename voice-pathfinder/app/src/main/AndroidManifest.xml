@@ -11,6 +11,10 @@
          progress: the type has to describe what the service is actually doing. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- While a call is up the service has to hold the microphone in the background, and it
+         is the app's own call stack rather than the default dialer. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Android's call stack carries our calls so the system owns audio focus, routing and
          the lock screen. Without it the app is an audio player that happens to be a phone. -->
@@ -49,7 +53,7 @@
         <service
             android:name=".PathfinderService"
             android:exported="false"
-            android:foregroundServiceType="specialUse">
+            android:foregroundServiceType="specialUse|phoneCall|microphone">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Keeps a SIP registration alive so calls can arrive." />

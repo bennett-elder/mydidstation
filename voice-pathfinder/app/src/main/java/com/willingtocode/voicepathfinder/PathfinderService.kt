@@ -11,6 +11,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
@@ -63,6 +64,46 @@ class PathfinderService : Service() {
                 pathfinder.declineIncoming()
                 return START_STICKY
             }
+        }
+        if (intent?.action == ACTION_PROMOTE || intent?.action == ACTION_DEMOTE) {
+            // A live call needs the microphone type, because recording in the background is
+            // refused without it, and the phoneCall type, because this app is the call stack.
+            // The registration is still special use, so the type is a set rather than a swap.
+            val types = if (intent.action == ACTION_PROMOTE) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            }
+            val notification = build(pathfinder.callState.value ?: pathfinder.state.value)
+            fun apply(kind: Int): Throwable? = runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    startForeground(NOTIFICATION_ID, notification, kind)
+                } else {
+                    startForeground(NOTIFICATION_ID, notification)
+                }
+            }.exceptionOrNull()
+
+            // The microphone type is refused when the app is not in a while-in-use state, which
+            // is exactly the case for a call arriving on a locked phone. phoneCall alone needs
+            // no such state, so it is the fallback rather than the surrender.
+            var refused = apply(types)
+            if (refused != null && intent.action == ACTION_PROMOTE) {
+                pathfinder.noteFromElsewhere("microphone type refused, asking for phoneCall alone: ${refused.message}")
+                refused = apply(ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL)
+            }
+            pathfinder.noteFromElsewhere(
+                if (refused == null) {
+                    "foreground type is now " + when (intent.action) {
+                        ACTION_PROMOTE -> "phoneCall and microphone"
+                        else -> "special use"
+                    }
+                } else {
+                    "the platform refused the foreground type: " +
+                        (refused.message ?: refused.javaClass.simpleName)
+                },
+            )
+            return START_STICKY
         }
         if (intent?.action == ACTION_STOP) {
             // Stopping the service while a call is up used to leave the call running with
@@ -175,6 +216,26 @@ class PathfinderService : Service() {
 
     companion object {
         const val ACTION_STOP = "com.willingtocode.voicepathfinder.STOP"
+
+        /** Asks for the call foreground type. Called when a call starts, idempotently. */
+        const val ACTION_PROMOTE = "com.willingtocode.voicepathfinder.PROMOTE"
+
+        /** Hands the service back to registration duty when the call ends. */
+        const val ACTION_DEMOTE = "com.willingtocode.voicepathfinder.DEMOTE"
+
+        /** Both are safe to call when the service is not running: it starts, then obeys. */
+        fun promote(context: Context) = ask(context, ACTION_PROMOTE)
+
+        fun demote(context: Context) = ask(context, ACTION_DEMOTE)
+
+        private fun ask(context: Context, action: String) {
+            runCatching {
+                ContextCompat.startForegroundService(
+                    context,
+                    Intent(context, PathfinderService::class.java).setAction(action),
+                )
+            }
+        }
 
         /** Carries the ringing notification's Answer and Decline. */
         const val ACTION_ANSWER = "com.willingtocode.voicepathfinder.ANSWER"
