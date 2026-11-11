@@ -140,6 +140,7 @@ internal fun ProductRoot(pathfinder: Pathfinder) {
     val call by pathfinder.callState.collectAsState()
     val live = call
     val ringing by pathfinder.incoming.collectAsState()
+    val onPlatform by pathfinder.incomingOnPlatform.collectAsState()
     val dids by pathfinder.dids.collectAsState()
     val fetching by pathfinder.fetching.collectAsState()
     val starting by pathfinder.starting.collectAsState()
@@ -155,7 +156,9 @@ internal fun ProductRoot(pathfinder: Pathfinder) {
             // A ringing call takes the screen too. The notification is the way to answer when the
             // app is closed, but when the app is open this is the thing in front of the person,
             // and it has to offer the same two answers.
-            ringing != null -> IncomingScreen(
+            // Not when Android is showing the call: two sets of Answer and Decline buttons for
+            // one ringing phone is a question, not a choice.
+            ringing != null && !onPlatform -> IncomingScreen(
                 call = ringing!!,
                 onAnswer = { pathfinder.answerIncoming() },
                 onDecline = { pathfinder.declineIncoming() },
@@ -1019,13 +1022,20 @@ private fun CallScreen(
 
         Section("Controls", "Everything here acts on the call that is up, not on settings.") {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // Each chip names what it controls and is lit while that is true. The old
+                // labels named the destination instead, so "Speaker" sat unlit beside an
+                // earpiece call and read as "tap to switch", while "Earpiece" sat lit
+                // beside a speaker call. One word, one meaning.
                 ToggleChip(
-                    label = if (muted) "Unmute" else "Mute",
+                    label = "Muted",
                     on = muted,
                     onClick = { onMuted(!muted) },
                 )
                 ToggleChip(
-                    label = if (speaker) "Earpiece" else "Speaker",
+                    // The word states where the call is, not where a press would take it. The
+                    // highlight repeats that, for the case where a shade of blue is the only
+                    // thing communicating it.
+                    label = if (speaker) "Speaker" else "Earpiece",
                     on = speaker,
                     onClick = { onSpeaker(!speaker) },
                 )

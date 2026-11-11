@@ -1,7 +1,10 @@
 package com.willingtocode.voicepathfinder
 
 import android.net.Uri
+import android.os.OutcomeReceiver
 import android.telecom.CallAudioState
+import android.telecom.CallEndpoint
+import android.telecom.CallEndpointException
 import android.telecom.Connection
 import android.telecom.ConnectionRequest
 import android.telecom.ConnectionService
@@ -40,12 +43,13 @@ internal class VoiceConnection(
         // VoIP mode, so Telecom owns the communication route and with it earpiece, speaker and
         // Bluetooth. Owning it ourselves works for the speaker and costs Bluetooth, which is
         // the wrong trade: this flag is the reason to involve Telecom at all.
-        // Measured, not assumed: with Telecom as the audio owner, `setAudioRoute(ROUTE_SPEAKER)`
-        // was accepted, Telecom reported `audio is on the speaker`, and the call stayed in the
-        // earpiece. So the connection is kept for the platform's record of the call, and the
-        // route is ours to set. The cost is that Bluetooth gets nothing to attach to.
-        setAudioModeIsVoip(false)
-        TelecomBridge.telecomOwnsAudio = false
+        // Telecom owns the route again, on the strength of the endpoint API rather than the
+        // legacy one. `setAudioRoute` was measured accepting the request and reporting the
+        // speaker while the call stayed in the earpiece, so the app routed audio itself. The
+        // endpoint call is the one Bluetooth rides on, and whether it moves a self-managed
+        // call on this device is the question this setting now tests.
+        setAudioModeIsVoip(true)
+        TelecomBridge.telecomOwnsAudio = true
         TelecomBridge.connection = this
         if (incoming) {
             // The call already exists: the INVITE lives in Pathfinder and the person answers
@@ -110,10 +114,65 @@ internal class VoiceConnection(
         if (state == STATE_ACTIVE && desiredSpeaker != null) applyRoute()
     }
 
+    /**
+     * Endpoints the platform says this call can be on, learned from Telecom itself.
+     *
+     * This is the modern routing model and the one Bluetooth rides on. The legacy
+     * `setAudioRoute` was measured here accepting the request, reporting the speaker, and
+     * leaving the audio in the earpiece, so the endpoint call is tried first and the legacy one
+     * is kept only for a call that has no endpoints to offer.
+     */
+    private var endpoints: List<CallEndpoint> = emptyList()
+
+    override fun onAvailableCallEndpointsChanged(endpoints: List<CallEndpoint>) {
+        this.endpoints = endpoints
+        val names = endpoints.joinToString { "${it.endpointName}" }
+        pathfinder.noteFromElsewhere("telecom: endpoints are $names")
+    }
+
+    override fun onCallEndpointChanged(endpoint: CallEndpoint) {
+        // This is the endpoint world's report of the route, and it is the only one a call that
+        // has endpoints still sends: `onCallAudioStateChanged` goes quiet once they exist. The
+        // screen was still listening to the legacy callback, so it kept reading earpiece after
+        // Telecom had moved the call to the speaker, and every press asked for the speaker
+        // that was already in use.
+        pathfinder.noteFromElsewhere("telecom: endpoint is now ${endpoint.endpointName}")
+        pathfinder.noteRouteFromPlatform(endpoint.endpointType == CallEndpoint.TYPE_SPEAKER)
+    }
+
     private fun applyRoute() {
         val on = desiredSpeaker ?: return
-        setAudioRoute(if (on) CallAudioState.ROUTE_SPEAKER else CallAudioState.ROUTE_EARPIECE)
-        pathfinder.noteFromElsewhere("telecom: route ${if (on) "speaker" else "earpiece"}")
+        val wanted = if (on) CallEndpoint.TYPE_SPEAKER else CallEndpoint.TYPE_EARPIECE
+        val endpoint = endpoints.firstOrNull { it.endpointType == wanted }
+        if (endpoint == null) {
+            // Deliberately not falling back to `setAudioRoute`. That call accepts the request and
+            // reports the route it was asked for whether or not audio moves, which is how an
+            // evening went by believing the speaker worked. A missing endpoint is the answer,
+            // not something to route around.
+            pathfinder.noteFromElsewhere(
+                "telecom: no ${if (on) "speaker" else "earpiece"} endpoint offered, " +
+                    "so no route was asked for",
+            )
+            return
+        }
+        pathfinder.noteFromElsewhere("telecom: asking for the ${endpoint.endpointName} endpoint")
+        requestCallEndpointChange(
+            endpoint,
+            // A Connection is not a Context, and this callback only writes a log line.
+            java.util.concurrent.Executor { command -> command.run() },
+            object : OutcomeReceiver<Void?, CallEndpointException> {
+                override fun onResult(result: Void?) {
+                    pathfinder.noteFromElsewhere("telecom: endpoint ${endpoint.endpointName} accepted")
+                }
+
+                override fun onError(error: CallEndpointException) {
+                    pathfinder.noteFromElsewhere(
+                        "telecom: endpoint ${endpoint.endpointName} refused, " +
+                            (error.message ?: error.javaClass.simpleName),
+                    )
+                }
+            },
+        )
     }
 
     /**

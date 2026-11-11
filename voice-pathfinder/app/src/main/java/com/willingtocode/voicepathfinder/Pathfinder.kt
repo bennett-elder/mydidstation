@@ -469,6 +469,10 @@ class Pathfinder(
     private val _incoming = MutableStateFlow<Incoming?>(null)
     val incoming: StateFlow<Incoming?> = _incoming
 
+    /** True while Android is showing the incoming call, so this app does not show it too. */
+    private val _incomingOnPlatform = MutableStateFlow(false)
+    val incomingOnPlatform: StateFlow<Boolean> = _incomingOnPlatform
+
     /** A dialog that is ringing or answered, held so it can be finished properly. */
     private class IncomingDialog(
         val line: Line,
@@ -503,7 +507,10 @@ class Pathfinder(
     private fun onLineRequest(line: Line, message: SipMessage) {
         when (message.start.method) {
             "INVITE" -> onInvite(line, message)
-            "ACK" -> note("the caller acknowledged the answer")
+            "ACK" -> {
+                note("the caller acknowledged the answer")
+                answerUnacked = false
+            }
             "BYE" -> {
                 val call = answered ?: ringing
                 if (call != null) {
@@ -576,9 +583,11 @@ class Pathfinder(
         // which is the only way the speaker toggle and a Bluetooth headset have anything to act
         // on. A refusal is logged rather than swallowed, since it costs the call its system
         // presence but not the call itself.
-        TelecomBridge.reportIncoming(appContext, caller, did)?.let { why ->
-            note("the platform would not take the incoming call: $why")
-        }
+        val refused = TelecomBridge.reportIncoming(appContext, caller, did)
+        // When the platform took the call it shows its own incoming screen, and ours beside it
+        // is a second set of Answer and Decline buttons for one ringing phone.
+        _incomingOnPlatform.value = refused == null
+        refused?.let { why -> note("the platform would not take the incoming call: $why") }
         // A call that is never answered has to stop ringing. Left alone it rings until the caller
         // gives up, which on a handset means an alarm nobody can silence except by declining.
         ringTimeout?.cancel()
@@ -629,6 +638,7 @@ class Pathfinder(
         val answer = SipMessage.response(dialog.invite, 200, "OK", dialog.tag, extra, sdp)
         note("200 OK as sent: " + answer.headers.joinToString(" | ") { "${it.first}: ${it.second.take(70)}" })
         runCatching { dialog.line.send(answer) }
+        keepAnsweringUntilAcknowledged(dialog.line, answer)
         val theirs = Sdp.inlineKey(dialog.offer.crypto.firstOrNull().orEmpty())
         val ours = Sdp.inlineKey("crypto:1 AES_CM_128_HMAC_SHA1_80 inline:$ourKey")
         val encrypted = dialog.offer.encrypted && dialog.media.encryptWith(ours, theirs)
@@ -653,6 +663,33 @@ class Pathfinder(
             at = System.currentTimeMillis(),
         )
         note("answered; media ${if (encrypted) "encrypted" else "in the clear"} to $remote")
+    }
+
+    /**
+     * True while an answer has been sent and the caller has not acknowledged it.
+     *
+     * An answer that does not reach the caller leaves them hearing ringback while this side
+     * shows a connected call, which is what happened on the handset: the 200 OK went out at
+     * 20:04:29 and the ACK came back ten seconds later, after the call had been hung up. Until
+     * the ACK arrives the answer is resent, so a lost response costs half a second rather than
+     * the call.
+     */
+    @Volatile
+    private var answerUnacked: Boolean = false
+
+    /** Twelve resends at 600 ms is about seven seconds, past the stall that was measured. */
+    private val answerResends = 12
+    private val answerResendMillis = 600L
+
+    private fun keepAnsweringUntilAcknowledged(line: Line, answer: SipMessage) {
+        answerUnacked = true
+        scope.launch {
+            repeat(answerResends) {
+                delay(answerResendMillis)
+                if (!answerUnacked) return@launch
+                runCatching { line.send(answer) }
+            }
+        }
     }
 
     /** Refuses the ringing call. */

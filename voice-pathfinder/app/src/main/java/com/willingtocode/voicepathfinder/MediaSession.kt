@@ -478,7 +478,10 @@ internal class MediaSession(
                 localRtpPort = localPort,
                 remoteMedia = remote?.let { "${it.address.hostAddress}:${it.port}" }.orEmpty(),
                 echoCancelled = audio?.echoCancelled ?: false,
-                speaker = audio?.speaker ?: false,
+                // Not `audio?.speaker`: under Telecom that field is whatever this app last set,
+                // which is nothing, so every 250 ms tick reset the route to earpiece. The flag
+                // is owned by whoever reported the route last, and this tick only carries it.
+                speaker = _stats.value.speaker,
             )
             sendPeak = 0f
             receivePeak = 0f
