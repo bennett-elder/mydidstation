@@ -169,7 +169,11 @@ class Pathfinder(
     val callState: StateFlow<PathState?> = _call
 
     /** The live call's counters: the product's call if one is up, otherwise the probe's. */
-    val stats: StateFlow<MediaStats> get() = outbound?.mediaStats ?: noCallStats
+    // An answered incoming call runs its own media session, and the screen reads this. Without
+    // the middle case the call screen showed zeros during an inbound call, which read as "no
+    // media" when the frames were actually leaving the phone.
+    val stats: StateFlow<MediaStats>
+        get() = outbound?.mediaStats ?: answered?.media?.stats ?: noCallStats
 
     private val _answers = MutableStateFlow(ProbeAnswers())
     val answers: StateFlow<ProbeAnswers> = _answers
@@ -453,7 +457,287 @@ class Pathfinder(
             .map { it.number }
     }
 
+    /**
+     * A call arriving on one of this phone's numbers.
+     *
+     * Only what the screen needs: who is calling, which number it is for, and which line picked
+     * it up. The dialog itself stays inside this class, because answering it is a sequence of
+     * SIP messages rather than a state the UI should be able to drive in any order.
+     */
+    data class Incoming(val caller: String, val did: String, val line: String)
+
+    private val _incoming = MutableStateFlow<Incoming?>(null)
+    val incoming: StateFlow<Incoming?> = _incoming
+
+    /** A dialog that is ringing or answered, held so it can be finished properly. */
+    private class IncomingDialog(
+        val line: Line,
+        val invite: SipMessage,
+        val offer: SdpAnswer,
+        val caller: String,
+        val did: String,
+        val tag: String,
+        val media: MediaSession,
+    ) {
+        /** The port the answer advertised, needed again when we send the BYE. */
+        var localPort: Int = 0
+    }
+
+    private var ringing: IncomingDialog? = null
+    private var answered: IncomingDialog? = null
+    private var ringTimeout: Job? = null
+
+    private fun newMedia(): MediaSession = MediaSession(
+        note = { text -> note(text) },
+        socketFactory = { LocalNetwork.rtpSocket() },
+        audioFactory = { log -> CallAudio(appContext, log) },
+    )
+
+    /**
+     * What an arriving request means.
+     *
+     * The provider only sends requests to a contact that is registered, so an INVITE here is a
+     * call for one of these numbers. Everything else in the dialog is the caller finishing a
+     * call that already exists, which is why ACK, BYE and CANCEL are handled and nothing else.
+     */
+    private fun onLineRequest(line: Line, message: SipMessage) {
+        when (message.start.method) {
+            "INVITE" -> onInvite(line, message)
+            "ACK" -> note("the caller acknowledged the answer")
+            "BYE" -> {
+                val call = answered ?: ringing
+                if (call != null) {
+                    runCatching {
+                        call.line.send(SipMessage.response(message, 200, "OK", call.tag))
+                    }
+                }
+                endIncoming("the caller hung up")
+            }
+            "CANCEL" -> {
+                val call = ringing
+                if (call == null) {
+                    // A CANCEL for a call that has already been answered is not a transaction we
+                    // have. Answering it 481 stops the retransmissions; answering 200 with a
+                    // fresh tag left the caller retrying until it gave up.
+                    runCatching {
+                        line.send(
+                            SipMessage.response(
+                                message,
+                                481,
+                                "Call/Transaction Does Not Exist",
+                                line.newTag(),
+                            ),
+                        )
+                    }
+                    note("a cancel arrived for a call that was already answered")
+                    return
+                }
+                if (call != null) {
+                    runCatching {
+                        // 487 terminates the INVITE this CANCEL refers to. Without it the caller
+                        // keeps waiting on a dialog nobody is going to answer.
+                        call.line.send(
+                            SipMessage.response(call.invite, 487, "Request Terminated", call.tag),
+                        )
+                        call.line.send(SipMessage.response(message, 200, "OK", call.tag))
+                    }
+                }
+                endIncoming("the caller cancelled")
+            }
+            else -> Unit
+        }
+    }
+
+    private fun onInvite(line: Line, message: SipMessage) {
+        if (ringing != null || answered != null || outbound != null) {
+            runCatching {
+                line.send(SipMessage.response(message, 486, "Busy Here", line.newTag()))
+            }
+            note("a call arrived while another was up, so it was refused with 486")
+            return
+        }
+        val offer = Sdp.parse(message.body)
+        if (offer == null) {
+            runCatching {
+                line.send(SipMessage.response(message, 488, "Not Acceptable Here", line.newTag()))
+            }
+            note("a call arrived with no usable audio stream, so it was refused with 488")
+            return
+        }
+        val caller = callerOf(message.header("From").orEmpty())
+        val did = numberIn(message.header("To").orEmpty()).ifBlank { line.account }
+        val dialog = IncomingDialog(line, message, offer, caller, did, line.newTag(), newMedia())
+        ringing = dialog
+        runCatching { line.send(SipMessage.response(message, 180, "Ringing", dialog.tag)) }
+        _incoming.value = Incoming(caller, did, line.account)
+        note("call from ${caller.ifBlank { "an unknown caller" }} for $did on ${line.account}")
+        IncomingAlerts.ringing(appContext, caller, did)
+        // Tell the platform as well. Telecom then owns audio routing for this call and shows it,
+        // which is the only way the speaker toggle and a Bluetooth headset have anything to act
+        // on. A refusal is logged rather than swallowed, since it costs the call its system
+        // presence but not the call itself.
+        TelecomBridge.reportIncoming(appContext, caller, did)?.let { why ->
+            note("the platform would not take the incoming call: $why")
+        }
+        // A call that is never answered has to stop ringing. Left alone it rings until the caller
+        // gives up, which on a handset means an alarm nobody can silence except by declining.
+        ringTimeout?.cancel()
+        ringTimeout = scope.launch {
+            delay(apiSettings.ringSeconds * 1000L)
+            if (ringing === dialog) {
+                runCatching {
+                    dialog.line.send(
+                        SipMessage.response(dialog.invite, 480, "Temporarily Unavailable", dialog.tag),
+                    )
+                }
+                endIncoming("missed: nobody answered in ${apiSettings.ringSeconds} s")
+            }
+        }
+    }
+
+    /** Answers the ringing call, or says why it cannot. */
+    fun answerIncoming() {
+        val dialog = ringing ?: return
+        ringing = null
+        ringTimeout?.cancel()
+        ringTimeout = null
+        IncomingAlerts.stopRinging(appContext)
+        val address = LocalNetwork.ipv4()?.address
+        val port = runCatching { dialog.media.open() }.getOrNull()
+        val ourKey = Sdp.newCryptoKey()
+        val sdp = if (address == null || port == null) {
+            null
+        } else {
+            Sdp.answer(dialog.offer, address, port, ourKey)
+        }
+        if (sdp == null) {
+            runCatching {
+                dialog.line.send(
+                    SipMessage.response(dialog.invite, 488, "Not Acceptable Here", dialog.tag),
+                )
+            }
+            _incoming.value = null
+            note("could not answer: the offer has no codec this app decodes")
+            return
+        }
+        // The 200 needs a Contact, which is where the caller sends its ACK, and it must echo any
+        // Record-Route so the route set survives. Without the first, the provider ignored our
+        // answer: the caller kept ringing while we were already sending media.
+        val extra = mutableListOf("Content-Type" to "application/sdp")
+        dialog.line.contact()?.let { extra += "Contact" to it }
+        for (route in dialog.invite.allHeaders("Record-Route")) extra += "Record-Route" to route
+        val answer = SipMessage.response(dialog.invite, 200, "OK", dialog.tag, extra, sdp)
+        note("200 OK as sent: " + answer.headers.joinToString(" | ") { "${it.first}: ${it.second.take(70)}" })
+        runCatching { dialog.line.send(answer) }
+        val theirs = Sdp.inlineKey(dialog.offer.crypto.firstOrNull().orEmpty())
+        val ours = Sdp.inlineKey("crypto:1 AES_CM_128_HMAC_SHA1_80 inline:$ourKey")
+        val encrypted = dialog.offer.encrypted && dialog.media.encryptWith(ours, theirs)
+        // The caller's media address comes from their offer, which is the one place it exists.
+        val remote = dialog.offer.address
+            ?.takeIf { it.isNotBlank() && dialog.offer.port > 0 }
+            ?.let { InetSocketAddress(it, dialog.offer.port) }
+        val audio = if (remote == null) {
+            note("the caller's SDP has no media address, so there is no audio path")
+            false
+        } else {
+            dialog.media.begin(scope, remote)
+        }
+        dialog.localPort = port ?: 0
+        answered = dialog
+        _incoming.value = null
+        _call.value = PathState.Connected(
+            number = dialog.caller.ifBlank { dialog.did },
+            codec = "PCMU/8000",
+            encrypted = encrypted,
+            audio = audio,
+            at = System.currentTimeMillis(),
+        )
+        note("answered; media ${if (encrypted) "encrypted" else "in the clear"} to $remote")
+    }
+
+    /** Refuses the ringing call. */
+    fun declineIncoming() {
+        val dialog = ringing ?: return
+        ringing = null
+        ringTimeout?.cancel()
+        ringTimeout = null
+        IncomingAlerts.stopRinging(appContext)
+        runCatching {
+            dialog.line.send(SipMessage.response(dialog.invite, 486, "Busy Here", dialog.tag))
+        }
+        _incoming.value = null
+        note("declined the call from ${dialog.caller.ifBlank { "an unknown caller" }}")
+        dialog.media.stop()
+    }
+
+    private fun endIncoming(reason: String) {
+        ringTimeout?.cancel()
+        ringTimeout = null
+        val dialog = answered ?: ringing
+        ringing = null
+        answered = null
+        _incoming.value = null
+        IncomingAlerts.stopRinging(appContext)
+        dialog?.media?.stop()
+        if (_call.value is PathState.Connected) _call.value = PathState.Ended(reason)
+        else note(reason)
+    }
+
+    /**
+     * A BYE for an answered incoming call.
+     *
+     * The dialog runs the other way round from an outbound one: our tag is in the INVITE's `To`,
+     * the caller's is in its `From`, and the CSeq is the INVITE's plus one. Getting any of those
+     * wrong is a BYE the far end answers `481`.
+     */
+    private fun byeFor(dialog: IncomingDialog): SipMessage {
+        val contact = dialog.invite.header("Contact").orEmpty()
+            .substringAfter("<", dialog.invite.header("From").orEmpty())
+            .substringBefore(">")
+            .substringBefore(";")
+        val uri = contact.ifBlank { dialog.invite.header("From").orEmpty().substringAfter("<").substringBefore(">") }
+        val cseq = SipMessage.cseqOf(dialog.invite)?.first ?: 1
+        val address = LocalNetwork.ipv4()?.address ?: "0.0.0.0"
+        val headers = mutableListOf(
+            "Via" to "SIP/2.0/UDP $address:${dialog.localPort};branch=z9hG4bK${randomHex(10)}",
+            "Max-Forwards" to "70",
+            // From in our BYE is the identity we answered as, which is the INVITE's To.
+            "From" to dialog.invite.header("To").orEmpty(),
+            "To" to dialog.invite.header("From").orEmpty(),
+            "Call-ID" to dialog.invite.header("Call-ID").orEmpty(),
+            "CSeq" to "${cseq + 1} BYE",
+            "User-Agent" to SipMessage.USER_AGENT,
+        )
+        return SipMessage.request("BYE", uri.ifBlank { "sip:${dialog.did}@${dialog.line.credentials.host}" }, headers)
+    }
+
+    /** The caller's number from a `From` header, without its display name. */
+    private fun callerOf(from: String): String = numberIn(from)
+
+    /** The digits inside `sip:...@host`, which is where a number lives in a URI. */
+    private fun numberIn(header: String): String {
+        val uri = header.substringAfter("sip:", "").substringBefore("@")
+        val digits = uri.filter { it.isDigit() || it == '+' }
+        return digits
+    }
+
     fun hangUp() {
+        val inbound = answered
+        if (inbound != null) {
+            // An answered incoming call is ended by us, so the BYE goes from the dialog we
+            // accepted. Without this branch Hang up did nothing at all on an inbound call,
+            // because the outbound call object is null for one.
+            answered = null
+            ringTimeout?.cancel()
+            ringTimeout = null
+            scope.launch {
+                runCatching { inbound.line.send(byeFor(inbound)) }
+                inbound.media.stop()
+                _call.value = PathState.Ended("hung up")
+                note("hung up the incoming call")
+            }
+            return
+        }
         val call = outbound ?: return
         scope.launch {
             call.hangUp()
@@ -478,13 +762,38 @@ class Pathfinder(
         _muted.value = on
     }
 
+    /** Records the route the platform reports, so the chip cannot disagree with it. */
+    fun noteRouteFromPlatform(on: Boolean) {
+        // The platform moved the route, so any device this app pinned a stream to has to go.
+        outbound?.followRoute(on)
+        answered?.media?.followRoute(on)
+        outbound?.noteSpeaker(on)
+        answered?.media?.noteSpeaker(on)
+    }
+
     fun setSpeaker(on: Boolean) {
         // Both, deliberately: Telecom holds the route during a self-managed call, and the media
         // layer keeps the flag the screen reads. Asking only the audio manager looked like it
         // worked and changed nothing, because the platform overruled it.
-        val viaPlatform = TelecomBridge.routeToSpeaker(on)
-        outbound?.setSpeaker(on)
-        if (viaPlatform) note("speaker ${if (on) "on" else "off"}, routed by Android")
+        // Only ask Telecom when Telecom actually holds the route. While the connection exists
+        // merely to report the call, its answer is a sentence and not a route.
+        val viaPlatform = TelecomBridge.telecomOwnsAudio && TelecomBridge.routeToSpeaker(on)
+        if (viaPlatform) {
+            // Telecom owns the route, so asking AudioManager as well would be two clients
+            // competing for one device. Only the state is recorded here.
+            outbound?.noteSpeaker(on)
+            answered?.media?.noteSpeaker(on)
+        } else {
+            outbound?.setSpeaker(on)
+            // An answered incoming call has no outbound Call object, so this used to reach
+            // nothing at all and the toggle silently did nothing.
+            answered?.media?.setSpeaker(on)
+        }
+        if (viaPlatform) {
+            note("speaker ${if (on) "on" else "off"}, routed by Android")
+        } else {
+            note("speaker ${if (on) "on" else "off"}")
+        }
     }
 
     /** Ends the call, deregisters, and leaves nothing running. */
@@ -563,6 +872,9 @@ class Pathfinder(
                     _dids.value = list
                     cacheDids(list)
                     publishReadiness()
+                    // The list arriving is what a launch may have been waiting for. Without this
+                    // the restore never happened until the next launch.
+                    startIfConfigured()
                     settings.checkedAt = System.currentTimeMillis()
                     _checkedAt.value = settings.checkedAt
                     note("${list.size} number(s) on this account")
@@ -685,12 +997,18 @@ class Pathfinder(
 
     /** Re-registers the chosen numbers after a restart, because a phone should not need a tap. */
     fun startIfConfigured() {
-        if (!settings.numbersConfirmed) return
-        if (settings.selectedDids.isEmpty()) return
-        if (_activeLines.value.isNotEmpty()) return
+        // "Nothing to restore" is not "starting". Leaving the flag set put a modal loading
+        // dialog in front of an app with no numbers chosen, which looked like a hung app and
+        // was: nothing was ever going to clear it.
+        if (!settings.numbersConfirmed || settings.selectedDids.isEmpty() ||
+            _activeLines.value.isNotEmpty()
+        ) {
+            _starting.value = false
+            return
+        }
         if (_dids.value.isEmpty()) {
-            // No cached list yet, so the refresh will call this again when it lands.
             note("waiting for the number list before restoring the registration")
+            _starting.value = false
             return
         }
         note("restoring the chosen numbers after a restart")
@@ -900,6 +1218,9 @@ class Pathfinder(
                     val credentials = credentialsFor(sub, servers)
                     _provision.value = ProvisionState.Working("registering")
                     val line = Line(sub.account, sub.id, credentials) { text -> note(text) }
+                    // One place decides what an arriving request means. The line owns the
+                    // socket and the dialog tags; choosing to ring is not its business.
+                    line.onRequest = { message -> onLineRequest(line, message) }
                     line.start(scope)
                     // Reported as the line moves, so the dial page follows a registration
                     // that lands a few seconds after the tap.
@@ -933,6 +1254,23 @@ class Pathfinder(
     }
 
     /** Stops every line, leaving the account exactly as it was. */
+    /**
+     * Re-registers everything from the current settings.
+     *
+     * Needed whenever the server, the port or the transport changes: running lines keep the
+     * credentials they were built with, so a new server silently did nothing and the log went
+     * on saying atlanta while the screen said tampa.
+     */
+    fun restartLines() {
+        scope.launch {
+            stopAnswering()
+            // A moment for the released sockets to go, so the re-register cannot race the
+            // deregistration of the same account.
+            kotlinx.coroutines.delay(400)
+            answerOnSelected()
+        }
+    }
+
     fun stopAnswering() {
         _activeLines.value.forEach { it.stop() }
         _activeLines.value = emptyList()
@@ -977,7 +1315,14 @@ class Pathfinder(
             Provisioning.chooseServer(status, servers)
                 ?: throw SipFault("no SIP server could be found for ${sub.account}")
         }
-        val tls = settings.useTls
+        // The account decides this, not a toggle. A sub-account with Encrypted SIP Traffic on
+        // registers over TLS; registering it over UDP succeeds and then cannot take a call,
+        // because the provider will not deliver over a transport the account does not allow.
+        // The setting can only add TLS to an account that does not require it.
+        val tls = working.sipTraffic || settings.useTls
+        if (working.sipTraffic && !settings.useTls) {
+            note("${working.account} requires encrypted SIP, so this line uses TLS whatever the setting says")
+        }
         return Provisioning.credentials(working, known, host, settings.portFor(tls), tls)
     }
 

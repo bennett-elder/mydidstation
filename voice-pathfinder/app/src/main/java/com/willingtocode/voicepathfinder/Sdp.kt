@@ -200,6 +200,52 @@ internal object Sdp {
         )
     }
 
+    /**
+     * The SDP we send in a 200 OK to a caller.
+     *
+     * Built from their offer rather than from our preferences: RFC 3264 requires the answer to
+     * name a subset of what was offered, with the same transport. Returns null when the offer
+     * has no codec this app can decode, because the honest answer to that is a refusal rather
+     * than an answer that names something we cannot use.
+     */
+    fun answer(
+        offer: SdpAnswer,
+        address: String,
+        port: Int,
+        cryptoKey: String,
+        ptime: Int = G711.FRAME_MILLIS,
+    ): String? {
+        val hasPcmu = offer.payloadTypes.contains(PCMU.payloadType)
+        if (!hasPcmu) return null
+        val encrypted = offer.protocol.equals(PROTO_SRTP, ignoreCase = true)
+        val types = if (offer.payloadTypes.contains(TELEPHONE_EVENT_PT)) {
+            listOf(PCMU.payloadType, TELEPHONE_EVENT_PT)
+        } else {
+            listOf(PCMU.payloadType)
+        }
+        val body = StringBuilder()
+        fun line(text: String) {
+            body.append(text).append("\r\n")
+        }
+        line("v=0")
+        line("o=- ${System.currentTimeMillis() / 1000} 1 IN IP4 $address")
+        line("s=-")
+        line("c=IN IP4 $address")
+        line("t=0 0")
+        line("m=audio $port ${if (encrypted) PROTO_SRTP else PROTO_RTP} ${types.joinToString(" ")}")
+        line("a=rtpmap:${PCMU.payloadType} PCMU/8000")
+        if (types.size > 1) {
+            line("a=rtpmap:$TELEPHONE_EVENT_PT telephone-event/8000")
+            line("a=fmtp:$TELEPHONE_EVENT_PT 0-16")
+        }
+        if (encrypted) {
+            line("a=crypto:1 $SRTP_SUITE inline:$cryptoKey")
+        }
+        line("a=ptime:$ptime")
+        line("a=sendrecv")
+        return body.toString()
+    }
+
     /** The selected codec, falling back to the payload type when rtpmap is absent. */
     fun codecFor(payloadType: Int, answer: SdpAnswer): Codec? =
         answer.payloadTypes.firstOrNull { it == payloadType }?.let { known[payloadType] }

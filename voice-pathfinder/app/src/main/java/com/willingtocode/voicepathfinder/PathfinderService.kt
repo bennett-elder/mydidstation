@@ -52,7 +52,22 @@ class PathfinderService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Answer and decline come from the ringing notification. Nothing else should be able to
+        // take a call, which is why it arrives as a service action rather than a broadcast.
+        when (intent?.action) {
+            ACTION_ANSWER -> {
+                pathfinder.answerIncoming()
+                return START_STICKY
+            }
+            ACTION_DECLINE -> {
+                pathfinder.declineIncoming()
+                return START_STICKY
+            }
+        }
         if (intent?.action == ACTION_STOP) {
+            // Stopping the service while a call is up used to leave the call running with
+            // nothing showing it. Stop means end what is happening, then stop.
+            pathfinder.hangUp()
             stopSelf()
             return START_NOT_STICKY
         }
@@ -160,6 +175,10 @@ class PathfinderService : Service() {
 
     companion object {
         const val ACTION_STOP = "com.willingtocode.voicepathfinder.STOP"
+
+        /** Carries the ringing notification's Answer and Decline. */
+        const val ACTION_ANSWER = "com.willingtocode.voicepathfinder.ANSWER"
+        const val ACTION_DECLINE = "com.willingtocode.voicepathfinder.DECLINE"
         private const val CHANNEL_ID = "registration"
         private const val NOTIFICATION_ID = 1
 

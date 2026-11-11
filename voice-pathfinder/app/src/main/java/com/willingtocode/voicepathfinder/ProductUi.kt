@@ -104,6 +104,25 @@ internal fun ProductRoot(pathfinder: Pathfinder) {
     var dialDid by remember { mutableStateOf<String?>(null) }
     var confirmed by remember { mutableStateOf(pathfinder.apiSettings.numbersConfirmed) }
 
+    // Asking for notifications up front, because an incoming call is presented as one. Without
+    // the grant the call rings and cannot be answered, which is worse than not ringing.
+    val hostContext = androidx.compose.ui.platform.LocalContext.current
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+        val notifications = rememberLauncherForActivityResult(
+            androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+        ) { }
+        LaunchedEffect(confirmed) {
+            if (confirmed &&
+                androidx.core.content.ContextCompat.checkSelfPermission(
+                    hostContext,
+                    android.Manifest.permission.POST_NOTIFICATIONS,
+                ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) {
+                notifications.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
+
     // The account is loaded from saved credentials without asking, which is the point of
     // having saved them. Onboarding is not a flag, it is the presence of a sealed blob.
     LaunchedEffect(hasCredentials) {
@@ -120,6 +139,7 @@ internal fun ProductRoot(pathfinder: Pathfinder) {
     var dialOpen by remember { mutableStateOf(false) }
     val call by pathfinder.callState.collectAsState()
     val live = call
+    val ringing by pathfinder.incoming.collectAsState()
     val dids by pathfinder.dids.collectAsState()
     val fetching by pathfinder.fetching.collectAsState()
     val starting by pathfinder.starting.collectAsState()
@@ -132,6 +152,14 @@ internal fun ProductRoot(pathfinder: Pathfinder) {
         when {
             !hasCredentials -> ConnectPage(pathfinder) { hasCredentials = true }
             !confirmed -> OnboardingScreen(pathfinder) { confirmed = true }
+            // A ringing call takes the screen too. The notification is the way to answer when the
+            // app is closed, but when the app is open this is the thing in front of the person,
+            // and it has to offer the same two answers.
+            ringing != null -> IncomingScreen(
+                call = ringing!!,
+                onAnswer = { pathfinder.answerIncoming() },
+                onDecline = { pathfinder.declineIncoming() },
+            )
             // A call in progress takes the whole screen: there is nothing to navigate to
             // while it is up, and the call is the most important thing on the device.
             live is PathState.Dialing || live is PathState.Ringing ||
@@ -1164,6 +1192,42 @@ private fun DialDialog(
  * line of text low on a page reads as a screen that has stopped working. Not dismissable:
  * there is nothing behind it to do yet.
  */
+/** A call arriving, while the app is open. Two answers and nothing else to do. */
+@Composable
+private fun IncomingScreen(
+    call: Pathfinder.Incoming,
+    onAnswer: () -> Unit,
+    onDecline: () -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text("Incoming call", style = MaterialTheme.typography.titleMedium)
+        Text(
+            if (call.caller.isBlank()) "Unknown caller" else prettyNumber(call.caller),
+            style = MaterialTheme.typography.headlineMedium,
+        )
+        Text(
+            "on ${prettyNumber(call.did)}",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(
+            modifier = Modifier.padding(top = 32.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            OutlinedButton(onClick = onDecline, modifier = Modifier.weight(1f).height(56.dp)) {
+                Text("Decline")
+            }
+            Button(onClick = onAnswer, modifier = Modifier.weight(1f).height(56.dp)) {
+                Text("Answer")
+            }
+        }
+    }
+}
+
 @Composable
 private fun LoadingDialog(title: String, detail: String) {
     Dialog(
@@ -1232,6 +1296,26 @@ private fun SettingsPage(
             ) { Text("Android call settings") }
 
             MockServerSwitch(pathfinder)
+
+            // Pinning a POP. The provider's list decides by default, but a DID carries its own
+            // POP assignment and delivery is not necessarily the same to a client registered
+            // elsewhere. Empty means automatic, which is what most accounts want.
+            var server by remember { mutableStateOf(settings.serverOverride) }
+            OutlinedTextField(
+                value = server,
+                onValueChange = { server = it },
+                label = { Text("SIP server (blank: automatic)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            TextButton(
+                onClick = {
+                    settings.serverOverride = server
+                    // Existing lines hold the old server, so they have to be rebuilt.
+                    pathfinder.restartLines()
+                },
+                enabled = working == null,
+            ) { Text("Save and register") }
             TextButton(
                 onClick = {
                     settings.clearApi()

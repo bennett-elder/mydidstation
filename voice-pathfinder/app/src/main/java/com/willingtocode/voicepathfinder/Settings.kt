@@ -176,6 +176,18 @@ class PathfinderSettings(
     /** The port to use, with the conventional default for the transport. */
     fun portFor(tls: Boolean): Int = serverPort.takeIf { it in 1..65535 } ?: if (tls) 5061 else 5060
 
+    /**
+     * How long a call rings before it is treated as missed.
+     *
+     * A setting rather than a constant because testing a ring means watching it, and a window
+     * measured in seconds turns a test into a reflex test.
+     */
+    var ringSeconds: Int
+        get() = prefs.getInt(KEY_RING_SECONDS, 30).coerceIn(5, 600)
+        set(value) {
+            prefs.edit().putInt(KEY_RING_SECONDS, value.coerceIn(5, 600)).apply()
+        }
+
     var lastNumber: String
         get() = prefs.getString(KEY_LAST_NUMBER, "") ?: ""
         set(value) {
@@ -270,6 +282,7 @@ class PathfinderSettings(
         const val KEY_DID_CACHE = "did_cache"
         const val KEY_CONFIRMED = "numbers_confirmed"
         const val KEY_MOCK = "use_mock"
+        const val KEY_RING_SECONDS = "ring_seconds"
 
         const val DEFAULT_ENDPOINT = "https://voip.ms/api/v1/rest.php"
 

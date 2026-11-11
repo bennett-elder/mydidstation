@@ -41,12 +41,20 @@ internal class CallAudio(
     private var track: AudioTrack? = null
     private var echo: AcousticEchoCanceler? = null
     private var manager: AudioManager? = null
+    private var focus: Any? = null
 
     override var echoCancelled: Boolean = false
         private set
 
-    /** Starts on the speaker: this probe is read off a screen, not held to an ear. */
-    override var speaker: Boolean = true
+    /**
+     * The last route this device was actually put on.
+     *
+     * It used to start true, left over from the probe, which is read off a screen rather than
+     * held to an ear. That `true` was copied into the screen's flag when a call opened, so the
+     * button believed the speaker was on, offered "Earpiece", and every tap asked for the
+     * earpiece the call was already on.
+     */
+    override var speaker: Boolean = false
         private set
 
     var started: Boolean = false
@@ -62,6 +70,11 @@ internal class CallAudio(
             }
         manager = audioManager
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+        // Focus, before the microphone opens. An outbound call gets this from Telecom through
+        // its connection; an inbound one is answered by this app directly, and without asking
+        // the just-finished ringtone keeps focus, the recorder returns no frames, and the call
+        // looks connected while sending nothing.
+        focus = requestFocus(audioManager)
 
         val frameBytes = G711.FRAME_SAMPLES * 2
         val input = AudioFormat.Builder()
@@ -154,6 +167,36 @@ internal class CallAudio(
     }
 
     /** Blocking read of at most one frame. Returns samples read, or a negative value. */
+    private fun requestFocus(audioManager: AudioManager): Any? = runCatching {
+        val attributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+            .build()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val request = android.media.AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+                .setAudioAttributes(attributes)
+                .setAcceptsDelayedFocusGain(true)
+                .build()
+            audioManager.requestAudioFocus(request)
+            request
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.requestAudioFocus(
+                null,
+                AudioManager.STREAM_VOICE_CALL,
+                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT,
+            )
+            attributes
+        }
+    }.getOrNull()
+
+    private fun abandonFocus(audioManager: AudioManager) {
+        val held = focus ?: return
+        runCatching {
+            if (held is android.media.AudioFocusRequest) audioManager.abandonAudioFocusRequest(held)
+        }
+    }
+
     override fun readFrame(buffer: ShortArray): Int {
         val recorder = record ?: return -1
         return try {
@@ -175,13 +218,40 @@ internal class CallAudio(
     }
 
     fun setSpeaker(on: Boolean) {
+        if (TelecomBridge.telecomOwnsAudio) {
+            // Telecom owns the route while it carries the call. Asking for a device here adds a
+            // second route client beside the privileged one, and the unprivileged one loses,
+            // so the request is a lie dressed as an action.
+            log("routing is Android's while Android carries the call")
+            return
+        }
         speaker = on
         val audioManager = manager ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val type = if (on) AudioDeviceInfo.TYPE_BUILTIN_SPEAKER else AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
             val device = audioManager.availableCommunicationDevices.firstOrNull { it.type == type }
             val routed = device != null && audioManager.setCommunicationDevice(device)
-            log("routing to ${if (on) "speaker" else "earpiece"}: ${if (routed) "set" else "refused"}")
+            // The streams follow the communication device only if nobody pinned them to another
+            // one. Asking each stream directly is what actually moves the audio; the manager
+            // call alone reports success while the track keeps playing where it started.
+            if (device != null) {
+                runCatching { track?.setPreferredDevice(device) }
+                runCatching { record?.setPreferredDevice(device) }
+            }
+            val current = audioManager.communicationDevice?.type
+            log(
+                "routing to ${if (on) "speaker" else "earpiece"}: " +
+                    "${if (routed) "set" else "refused"}, device now " +
+                    when (current) {
+                        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "speaker"
+                        AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "earpiece"
+                        AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "bluetooth"
+                        AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES ->
+                            "wired headset"
+                        null -> "unknown"
+                        else -> current.toString()
+                    },
+            )
         } else {
             @Suppress("DEPRECATION")
             audioManager.isSpeakerphoneOn = on
@@ -190,6 +260,47 @@ internal class CallAudio(
     }
 
     override fun useSpeaker(on: Boolean) = setSpeaker(on)
+
+    /**
+     * Drops the per-stream device pins.
+     *
+     * `setPreferredDevice` outranks the communication device, so a pin left over from an
+     * earlier route keeps the audio there no matter what the platform decides. Telecom said
+     * the route was the speaker while the call stayed in the earpiece for exactly this reason.
+     */
+    override fun releaseRouting() {
+        runCatching { track?.setPreferredDevice(null) }
+        runCatching { record?.setPreferredDevice(null) }
+    }
+
+    /**
+     * Carries the platform's route down to the streams when it did not arrive on its own.
+     *
+     * Telecom reported the speaker while the call stayed in the earpiece. `setPreferredDevice`
+     * outranks the communication device, so pinning the two streams is the one lever left that
+     * moves audio the platform has already declared moved. Where the platform did apply the
+     * route, the pins are dropped so they cannot disagree with it later.
+     */
+    override fun followRoute(onSpeaker: Boolean) {
+        val audioManager = manager ?: return
+        val wanted = if (onSpeaker) {
+            AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+        } else {
+            AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+        }
+        val device = audioManager.availableCommunicationDevices.firstOrNull { it.type == wanted }
+            ?: return
+        if (audioManager.communicationDevice?.type == wanted) {
+            releaseRouting()
+            return
+        }
+        runCatching { track?.setPreferredDevice(device) }
+        runCatching { record?.setPreferredDevice(device) }
+        log(
+            "the route did not reach the streams, so they are pinned to " +
+                (if (onSpeaker) "the speaker" else "the earpiece"),
+        )
+    }
 
     override fun stop() {
         runCatching { record?.stop() }
@@ -202,6 +313,8 @@ internal class CallAudio(
         echo = null
         echoCancelled = false
         started = false
+        manager?.let { abandonFocus(it) }
+        focus = null
 
         val audioManager = manager
         if (audioManager != null) {

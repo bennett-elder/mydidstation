@@ -119,12 +119,17 @@ class Media:
         self.sequence = random.getrandbits(16)
         self.timestamp = random.getrandbits(32)
         self.received = 0
+        self.thread = None
 
     def start(self):
-        if self.running:
+        # Restarting has to survive a dead thread: an error inside the echo loop used to leave
+        # `running` True with nobody reading, so every later call was silent and looked like the
+        # app had stopped sending.
+        if self.running and self.thread is not None and self.thread.is_alive():
             return
         self.running = True
-        threading.Thread(target=self._run, daemon=True).start()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
 
     def stop(self):
         self.running = False
@@ -136,6 +141,7 @@ class Media:
             except socket.timeout:
                 continue
             except OSError:
+                self.running = False
                 return
             if len(packet) < 12:
                 continue
@@ -151,6 +157,7 @@ class Media:
             try:
                 self.sock.sendto(header + payload, source)
             except OSError:
+                self.running = False
                 return
             self.sequence = (self.sequence + 1) & 0xFFFF
             self.timestamp = (self.timestamp + 160) & 0xFFFFFFFF
@@ -169,6 +176,8 @@ def main():
     parser.add_argument("--port", type=int, default=5060)
     parser.add_argument("--media-port", type=int, default=40000)
     parser.add_argument("--ring-seconds", type=float, default=2.0)
+    parser.add_argument("--control-port", type=int, default=5062,
+                        help="UDP port that places a call into the app when it receives 'invite'")
     parser.add_argument("--host", default="10.0.2.2",
                         help="address advertised in SDP, as the emulator sees this machine")
     args = parser.parse_args()
@@ -177,6 +186,47 @@ def main():
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("0.0.0.0", args.port))
     media = Media(args.media_port)
+
+    # Where the app last registered. A call has to arrive at the contact it advertised, which
+    # is the only address the provider would use.
+    registration = {"source": None, "contact": ""}
+
+    def call_the_app():
+        target = registration["source"]
+        if target is None:
+            log("control: no registration yet, nothing to call")
+            return
+        contact = registration["contact"] or f"sip:app@{args.host}"
+        sip = (
+            f"INVITE {contact} SIP/2.0\r\n"
+            f"Via: SIP/2.0/UDP {args.host}:{args.port};branch=z9hG4bKmock{random.getrandbits(32):08x}\r\n"
+            "Max-Forwards: 70\r\n"
+            "From: \"Mock Caller\" <sip:5559876543@mock>;tag=mockfrom\r\n"
+            # A real INVITE addresses the contact but names the DID being called in To. The app
+            # shows the To user, so it has to be the number rather than the sub-account.
+            "To: <sip:5551234567@" + args.host + ">\r\n"
+            f"Call-ID: mock-call-{random.getrandbits(32):08x}@mock\r\n"
+            "CSeq: 1 INVITE\r\n"
+            f"Contact: <sip:mock@{args.host}:{args.port}>\r\n"
+            "Content-Type: application/sdp\r\n"
+            "User-Agent: mock-sip\r\n"
+        )
+        body = sdp_answer(args.host, args.media_port)
+        message = (sip + f"Content-Length: {len(body)}\r\n\r\n" + body).encode()
+        sock.sendto(message, target)
+        log(f"control: INVITE sent to {target[0]}:{target[1]}")
+
+    def control():
+        channel = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        channel.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        channel.bind(("0.0.0.0", args.control_port))
+        log(f"control on udp {args.control_port}: send 'invite' to call the app")
+        while True:
+            data, _ = channel.recvfrom(64)
+            if data.strip().lower() == b"invite":
+                call_the_app()
+
+    threading.Thread(target=control, daemon=True).start()
     log(f"mock SIP on {args.host}:{args.port}, media on {args.media_port}")
 
     while True:
@@ -202,6 +252,8 @@ def main():
                 sock.sendto(answering(headers, 200, "OK", [("Expires", "0")]), source)
                 continue
             granted = min(asked, MAX_EXPIRY)
+            registration["source"] = source
+            registration["contact"] = re.sub(r"<|>", "", headers.get("contact", "")).split(";")[0]
             contact = re.sub(r";expires=\d+", "", headers.get("contact", ""), flags=re.I)
             log(f"REGISTER from {who} -> 200, granted {granted} s")
             sock.sendto(

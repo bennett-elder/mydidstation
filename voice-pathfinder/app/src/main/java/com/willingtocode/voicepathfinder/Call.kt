@@ -185,6 +185,12 @@ internal class Call(
     /** Moves this call between the speaker and the earpiece. */
     fun setSpeaker(on: Boolean) = media.setSpeaker(on)
 
+    fun noteSpeaker(on: Boolean) = media.noteSpeaker(on)
+
+    fun releaseRouting() = media.releaseRouting()
+
+    fun followRoute(on: Boolean) = media.followRoute(on)
+
     /** Ends the call and releases everything, whether or not it was up. */
     fun close() {
         media.stop()

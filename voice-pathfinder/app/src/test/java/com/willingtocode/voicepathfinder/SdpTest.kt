@@ -160,4 +160,45 @@ class SdpTest {
         assertEquals("AAAA", Sdp.base64(ByteArray(3)))
         assertEquals(40, Sdp.base64(ByteArray(30)).length)
     }
+
+    @Test
+    fun `an answer mirrors a clear offer without inventing crypto`() {
+        val offer = Sdp.parse(
+            "v=0\r\n"+"c=IN IP4 198.51.100.4\r\n"+"m=audio 41000 RTP/AVP 0 101\r\n" +
+                "a=rtpmap:0 PCMU/8000\r\n"+"a=rtpmap:101 telephone-event/8000\r\n",
+        )
+        assertNotNull(offer)
+        val answer = Sdp.answer(offer!!, address, 40000, cryptoKey = "key")
+        assertNotNull(answer)
+        assertTrue(answer!!.contains("m=audio 40000 RTP/AVP 0 101\r\n"))
+        assertTrue(answer.contains("c=IN IP4 $address\r\n"))
+        assertTrue(answer.contains("a=ptime:20\r\n"))
+        assertFalse(answer.contains("a=crypto"))
+    }
+
+    @Test
+    fun `an answer to an encrypted offer uses our own key`() {
+        val offer = Sdp.parse(
+            "v=0\r\n"+"c=IN IP4 198.51.100.4\r\n"+"m=audio 41000 RTP/SAVP 0\r\n" +
+                "a=rtpmap:0 PCMU/8000\r\n" +
+                "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:theirKey\r\n",
+        )
+        assertNotNull(offer)
+        val answer = Sdp.answer(offer!!, address, 40000, cryptoKey = "ourKey")
+        assertTrue(answer!!.contains("m=audio 40000 RTP/SAVP 0\r\n"))
+        assertTrue(answer.contains("a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:ourKey\r\n"))
+        // The telephone event was not offered, so it must not be answered: RFC 3264 forbids
+        // naming a payload type that the offer did not contain.
+        assertFalse(answer.contains("101"))
+    }
+
+    @Test
+    fun `an offer with no codec this app decodes is refused rather than answered`() {
+        val offer = Sdp.parse(
+            "v=0\r\n"+"c=IN IP4 198.51.100.4\r\n"+"m=audio 41000 RTP/AVP 9\r\n" +
+                "a=rtpmap:9 G722/8000\r\n",
+        )
+        assertNotNull(offer)
+        assertNull(Sdp.answer(offer!!, address, 40000, cryptoKey = "key"))
+    }
 }

@@ -91,15 +91,25 @@ internal class TlsLink(host: String, port: Int) : SipLink {
     override val transport: String get() = "TLS"
     override val reliable: Boolean get() = true
 
+    // One writer at a time. The keepalive runs on its own coroutine and writes to this same
+    // stream, and two interleaved writes would put CRLFs inside a SIP message. The provider
+    // then parses a body of the wrong length and does not answer until more bytes arrive,
+    // which is exactly a nine second stall before an ACK.
+    private val writeLock = Any()
+
     override fun send(bytes: ByteArray, target: InetSocketAddress?) {
-        output.write(bytes)
-        output.flush()
+        synchronized(writeLock) {
+            output.write(bytes)
+            output.flush()
+        }
     }
 
     /** CRLFCRLF, which a TLS connection needs to survive a NAT idle timer. */
     fun keepalive() {
-        output.write(KEEPALIVE)
-        output.flush()
+        synchronized(writeLock) {
+            output.write(KEEPALIVE)
+            output.flush()
+        }
     }
 
     override fun receive(): Incoming? {

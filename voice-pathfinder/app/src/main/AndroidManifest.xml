@@ -15,6 +15,10 @@
     <!-- Android's call stack carries our calls so the system owns audio focus, routing and
          the lock screen. Without it the app is an audio player that happens to be a phone. -->
     <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <!-- A ringing call has to take over the lock screen. Without this, API 34 refuses a
+         CallStyle notification outright: "Not posted. CallStyle notifications must be for a
+         foreground service or user initiated job or use a fullScreenIntent." -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
     <application
         android:name=".PathfinderApp"

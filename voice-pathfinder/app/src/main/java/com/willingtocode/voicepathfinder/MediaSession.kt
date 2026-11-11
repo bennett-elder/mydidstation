@@ -27,6 +27,13 @@ internal interface CallAudioPort {
     fun write(samples: ShortArray, count: Int)
     /** Routes the call to the speaker or the earpiece. Named apart from the property. */
     fun useSpeaker(on: Boolean)
+
+    /** Stops pinning the streams to a device, so the platform's route decides. */
+    fun releaseRouting()
+
+    /** Makes the streams follow a route the platform reported. */
+    fun followRoute(onSpeaker: Boolean)
+
     fun stop()
     val echoCancelled: Boolean
     val speaker: Boolean
@@ -130,7 +137,7 @@ internal class MediaSession(
      * A `180 Ringing` carries no audio, so the tone is the caller's job. Without this the
      * caller hears silence until the call is answered, which reads as a broken call.
      */
-    fun beginTone(scope: CoroutineScope, onSpeaker: Boolean = true): Boolean {
+    fun beginTone(scope: CoroutineScope, onSpeaker: Boolean = false): Boolean {
         if (toneJob != null) return true
         val opened = device()
         if (opened == null) {
@@ -138,7 +145,6 @@ internal class MediaSession(
             return false
         }
         opened.useSpeaker(onSpeaker)
-        _stats.update { it.copy(speaker = opened.speaker) }
         toneJob = scope.launch { toneLoop(opened) }
         return true
     }
@@ -148,7 +154,7 @@ internal class MediaSession(
         toneJob = null
     }
 
-    fun begin(scope: CoroutineScope, to: InetSocketAddress, onSpeaker: Boolean = true): Boolean {
+    fun begin(scope: CoroutineScope, to: InetSocketAddress, onSpeaker: Boolean = false): Boolean {
         val bound = socket ?: throw SipFault("the media session was opened before it had a port")
         stopTone()
         remote = to
@@ -161,7 +167,6 @@ internal class MediaSession(
         // The probe's habit, kept while the probe is still the harness: a phone call belongs
         // on the earpiece, but a screen being read across a desk does not.
         device.useSpeaker(onSpeaker)
-        _stats.update { it.copy(speaker = device.speaker) }
 
         jitter.reset()
         ssrc = random.nextInt().toLong() and 0xFFFFFFFFL
@@ -242,9 +247,25 @@ internal class MediaSession(
         sequence = Sequence.next(sequence)
     }
 
+    /** Hands routing back to the platform, which is what Telecom expects to own. */
+    fun releaseRouting() {
+        audio?.releaseRouting()
+    }
+
+    fun followRoute(onSpeaker: Boolean) {
+        audio?.followRoute(onSpeaker)
+    }
+
+    /** Records the route without asking the platform for one. */
+    fun noteSpeaker(on: Boolean) {
+        _stats.update { it.copy(speaker = on) }
+    }
+
     fun setSpeaker(on: Boolean) {
         audio?.useSpeaker(on)
-        _stats.update { it.copy(speaker = audio?.speaker ?: on) }
+        // Only what the device reports, never the wish. Recording the wish here made the
+        // chip claim a route the call did not have, and every later tap then sent "off".
+        _stats.update { it.copy(speaker = audio?.speaker ?: false) }
     }
 
     /** Stops the loops and releases the socket. Safe to call more than once. */
@@ -292,6 +313,7 @@ internal class MediaSession(
         var first = true
         while (isActive) {
             val read = device.readFrame(pcm)
+            if (first) note("send loop: first read returned $read")
             if (muted) pcm.fill(0)
             if (read <= 0) {
                 note("microphone stopped returning frames ($read)")
@@ -323,6 +345,9 @@ internal class MediaSession(
                 }
             } ?: packet
             try {
+                if (framesSent.get() < 3L) {
+                    note("sending ${wire.size} bytes to ${target.address.hostAddress}:${target.port} from ${bound.localPort}")
+                }
                 bound.send(DatagramPacket(wire, wire.size, target))
             } catch (fault: Exception) {
                 if (isActive) note("RTP send failed: ${describe(fault)}")

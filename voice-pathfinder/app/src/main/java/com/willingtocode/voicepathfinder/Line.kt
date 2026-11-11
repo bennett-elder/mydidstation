@@ -217,13 +217,16 @@ internal class Line(
                 "from $localIp:${created.localPort}",
         )
         receive(created)
-        if (created is TlsLink) {
-            // A TLS connection behind a NAT needs traffic to survive the idle timer, and a
-            // registration refresh measured in minutes is far too slow to do that.
-            keepalive = scope.launch {
-                while (isActive) {
-                    delay(KEEPALIVE_MILLIS)
-                    runCatching { created.keepalive() }
+        // Both transports need this. A TLS connection has to survive the NAT idle timer, and a
+        // UDP one has the same problem from the other side: the registration refresh runs at 80%
+        // of the grant, which is 48 minutes for an hour, and a UDP mapping is gone in under a
+        // minute. After that the provider's INVITE is addressed to a closed hole and dropped
+        // without an error, while its own view still says the client is registered.
+        keepalive = scope.launch {
+            while (isActive) {
+                delay(KEEPALIVE_MILLIS)
+                runCatching {
+                    if (created is TlsLink) created.keepalive() else created.send(KEEPALIVE_PING, null)
                 }
             }
         }
@@ -245,8 +248,17 @@ internal class Line(
             while (isActive) {
                 val incoming = current.receive() ?: break
                 val message = SipMessage.parse(incoming.bytes) ?: continue
-                // Only responses to this line's own requests matter yet. A request arriving
-                // here is an incoming call, which is the next phase.
+                // Every message in, unfiltered. A reply the provider sends to something we sent
+                // (a 4xx to our 200, for instance) matched no pending request and vanished
+                // without a trace, which is how a broken answer looks like no answer at all.
+                log("$account <<< ${message.start.firstLine.take(120)}")
+                if (message.start.isRequest) {
+                    // A request on this socket is a call: the provider only sends INVITE and its
+                    // in-dialog requests to a registered contact. Responses are matched by
+                    // CSeq below, so the two cannot be confused.
+                    onRequest(message)
+                    continue
+                }
                 val cseqPair = SipMessage.cseqOf(message) ?: continue
                 pending["${cseqPair.first} ${cseqPair.second}"]?.trySend(message)
             }
@@ -271,9 +283,37 @@ internal class Line(
         }
     }
 
-    private fun send(message: SipMessage) {
+    /** Answers an incoming call on this line, and nothing else. */
+    internal fun send(message: SipMessage) {
         val current = link ?: throw SipFault("the line is closed")
-        current.send(message.toBytes())
+        val bytes = message.toBytes()
+        log("$account >>> ${message.start.firstLine.take(120)} (${bytes.size} bytes, body ${message.body.toByteArray(Charsets.ISO_8859_1).size})")
+        current.send(bytes)
+    }
+
+    /** Where an incoming request goes. Set by the owner, which decides what to do with it. */
+    @Volatile
+    var onRequest: (SipMessage) -> Unit = {}
+
+    /** A tag for the dialog this line would create if it answers. */
+    fun newTag(): String = randomHex(8)
+
+    /**
+     * This line's contact, for a 200 OK to an INVITE.
+     *
+     * RFC 3261 requires a Contact in a 2xx to an INVITE: it is the address the caller sends
+     * its ACK to. Without it the provider never acknowledged our answer, kept ringing the
+     * caller, and eventually cancelled a call we had already picked up.
+     */
+    internal fun contact(): String? {
+        val current = link ?: return null
+        return Provider.contactUri(
+            credentials.host,
+            credentials.username,
+            localIp,
+            current.localPort,
+            if (credentials.tls) "tls" else null,
+        )
     }
 
     private fun branch(): String = "z9hG4bK" + randomHex(10)
@@ -288,6 +328,9 @@ internal class Line(
         const val REGISTER_TIMEOUT_MILLIS = 16_000L
         const val DEREGISTER_TIMEOUT_MILLIS = 5_000L
         const val KEEPALIVE_MILLIS = 25_000L
+
+        /** CRLFCRLF: a SIP ping. Servers ignore it and NATs count it as traffic. */
+        val KEEPALIVE_PING = "\r\n\r\n".toByteArray()
         const val MIN_REFRESH_MILLIS = 30_000L
     }
 }

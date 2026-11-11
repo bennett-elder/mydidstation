@@ -52,6 +52,33 @@ internal class SipMessage(
 
         const val USER_AGENT = "VoicePathfinder/0.1"
 
+        /**
+         * A response to [incoming].
+         *
+         * Every Via is echoed, not just the first: a response that drops one is a response the
+         * sender cannot match to its transaction. To gains a tag when the request had none,
+         * which is what makes the dialog afterwards addressable.
+         */
+        fun response(
+            incoming: SipMessage,
+            code: Int,
+            reason: String,
+            localTag: String,
+            extra: List<Pair<String, String>> = emptyList(),
+            body: String = "",
+        ): SipMessage {
+            val headers = mutableListOf<Pair<String, String>>()
+            for (via in incoming.allHeaders("Via")) headers += "Via" to via
+            incoming.header("From")?.let { headers += "From" to it }
+            val to = incoming.header("To").orEmpty()
+            headers += "To" to if (to.contains("tag=", ignoreCase = true)) to else "$to;tag=$localTag"
+            incoming.header("Call-ID")?.let { headers += "Call-ID" to it }
+            incoming.header("CSeq")?.let { headers += "CSeq" to it }
+            headers += extra
+            headers += "User-Agent" to USER_AGENT
+            return SipMessage(SipStart(status = code, reason = reason), headers, body)
+        }
+
         fun request(
             method: String,
             uri: String,

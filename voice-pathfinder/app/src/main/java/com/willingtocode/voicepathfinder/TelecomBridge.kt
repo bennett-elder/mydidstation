@@ -30,6 +30,9 @@ internal object TelecomBridge {
     /** The number the call should be presented from, chosen in the dialer. */
     const val EXTRA_FROM_DID = "com.willingtocode.voicepathfinder.FROM_DID"
 
+    /** The caller, for an arriving call. */
+    const val EXTRA_CALLER = "com.willingtocode.voicepathfinder.CALLER"
+
     /**
      * The choice made in the dialer, for the connection that is about to be created.
      *
@@ -64,6 +67,19 @@ internal object TelecomBridge {
     var connection: VoiceConnection? = null
 
     /** Routes the live call, returning false when there is no call to route. */
+    /** True while a Telecom connection owns this app's audio routing. */
+    fun isCarrying(): Boolean = connection != null
+
+    /**
+     * True when Telecom holds the audio route, false when this app does.
+     *
+     * Set by the connection itself, because that is where the choice is made. The two things
+     * are separate: a connection can exist purely to tell the platform a call is up, which is
+     * what happens when [pathfinderOwnsAudio] is set.
+     */
+    @Volatile
+    var telecomOwnsAudio: Boolean = false
+
     fun routeToSpeaker(on: Boolean): Boolean {
         val live = connection ?: return false
         live.routeToSpeaker(on)
@@ -107,6 +123,24 @@ internal object TelecomBridge {
             pendingFromDid = fromDid
         }
         telecom(context)?.placeCall(Uri.fromParts("tel", number, null), extras)
+        null
+    } catch (fault: Exception) {
+        fault.message?.takeIf { it.isNotBlank() } ?: fault.javaClass.simpleName
+    }
+
+    /**
+     * Tells the platform a call is arriving.
+     *
+     * Without this an incoming call is ours alone: no connection, so no platform routing, and
+     * the speaker toggle has nothing that outranks it. It is the inbound half of what
+     * [placeCall] does for outbound.
+     */
+    fun reportIncoming(context: Context, caller: String, did: String): String? = try {
+        val extras = Bundle().apply {
+            putString(EXTRA_CALLER, caller)
+            putString(EXTRA_FROM_DID, did)
+        }
+        telecom(context)?.addNewIncomingCall(handle(context), extras)
         null
     } catch (fault: Exception) {
         fault.message?.takeIf { it.isNotBlank() } ?: fault.javaClass.simpleName

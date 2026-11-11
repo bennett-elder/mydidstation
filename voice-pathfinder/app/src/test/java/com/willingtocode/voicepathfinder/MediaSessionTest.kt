@@ -52,6 +52,14 @@ class MediaSessionTest {
             speaker = on
         }
 
+        override fun releaseRouting() {
+            speaker = false
+        }
+
+        override fun followRoute(onSpeaker: Boolean) {
+            speaker = onSpeaker
+        }
+
         override fun stop() = Unit
 
         override var echoCancelled = false
