@@ -42,6 +42,7 @@ import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.graphics.Color
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -140,7 +141,6 @@ internal fun ProductRoot(pathfinder: Pathfinder) {
     val call by pathfinder.callState.collectAsState()
     val live = call
     val ringing by pathfinder.incoming.collectAsState()
-    val onPlatform by pathfinder.incomingOnPlatform.collectAsState()
     val dids by pathfinder.dids.collectAsState()
     val fetching by pathfinder.fetching.collectAsState()
     val starting by pathfinder.starting.collectAsState()
@@ -156,9 +156,10 @@ internal fun ProductRoot(pathfinder: Pathfinder) {
             // A ringing call takes the screen too. The notification is the way to answer when the
             // app is closed, but when the app is open this is the thing in front of the person,
             // and it has to offer the same two answers.
-            // Not when Android is showing the call: two sets of Answer and Decline buttons for
-            // one ringing phone is a question, not a choice.
-            ringing != null && !onPlatform -> IncomingScreen(
+            // Always ours. Android shows no call screen for a self-managed call, so what looked
+            // like the platform's UI was this app's own notification, and hiding the screen in
+            // its favour left a ringing phone whose only answer was in the shade.
+            ringing != null -> IncomingScreen(
                 call = ringing!!,
                 onAnswer = { pathfinder.answerIncoming() },
                 onDecline = { pathfinder.declineIncoming() },
@@ -395,7 +396,9 @@ private fun lineLabel(state: LineState?): String? = when (state) {
     null -> null
     LineState.Idle -> "idle"
     is LineState.Preparing -> state.step
-    is LineState.Registered -> "registered, ${state.grantedSeconds} s"
+    // No grant in seconds. The row above the list already says what is left of it in words
+    // ("renews in 59 min"), and the same fact twice in two units reads as two facts.
+    is LineState.Registered -> "registered"
     is LineState.Failed -> state.reason
     LineState.Stopped -> "stopped"
 }
@@ -601,6 +604,51 @@ private fun stateLabel(state: PathState): String = when (state) {
  * the lines' registration, which is the only thing that decides whether a call can reach
  * this phone.
  */
+/**
+ * What one line is doing, in words with evidence behind them.
+ *
+ * "Ready." was a summary of a count, so a line that had registered an hour ago and one that
+ * had failed were the same sentence. This names the transport, the server and what is left of
+ * the grant, or the reason there is none.
+ */
+internal fun lineStanding(
+    state: LineState?,
+    transport: String,
+    host: String,
+    now: Long = System.currentTimeMillis(),
+): String = when (state) {
+    null -> "Not started."
+    is LineState.Registered -> {
+        val left = (state.atMillis + state.grantedSeconds * 1000L - now).coerceAtLeast(0L)
+        val minutes = left / 60_000L
+        val when_ = if (minutes >= 1) "renews in $minutes min" else "renews shortly"
+        "Registered over $transport to $host, $when_."
+    }
+    is LineState.Preparing -> "Registering: ${state.step}"
+    is LineState.Failed -> "Not registered: ${state.reason}"
+    LineState.Stopped -> "Stopped."
+    LineState.Idle -> "Idle."
+}
+
+internal fun agreementLabel(agreement: Pathfinder.Agreement?): String = when (agreement) {
+    null, Pathfinder.Agreement.Unknown -> "provider: not asked yet"
+    Pathfinder.Agreement.Checking -> "provider: asking…"
+    is Pathfinder.Agreement.Agrees -> {
+        val where = listOfNotNull(agreement.transport, agreement.server)
+        if (where.isEmpty()) "provider agrees" else "provider agrees (${where.joinToString(", ")})"
+    }
+    is Pathfinder.Agreement.Disagrees -> "provider: ${agreement.why}"
+    is Pathfinder.Agreement.Unreachable -> "provider unreachable: ${agreement.why}"
+}
+
+/** Green when the provider agrees, amber while unknown, red when it does not. */
+internal fun agreementColor(agreement: Pathfinder.Agreement?): Long = when (agreement) {
+    is Pathfinder.Agreement.Agrees -> 0xFF2E7D32
+    is Pathfinder.Agreement.Disagrees -> 0xFFC62828
+    is Pathfinder.Agreement.Unreachable -> 0xFFC62828
+    else -> 0xFFB26A00
+}
+
 internal fun dialStatus(
     readiness: Pathfinder.Readiness,
     state: PathState?,
@@ -649,6 +697,10 @@ private fun HistoryPage(
 ) {
     val calls by pathfinder.calls.collectAsState()
     val checkedAt by pathfinder.callsCheckedAt.collectAsState()
+    // The standing line needs the same three facts the dialer's status uses.
+    val readiness by pathfinder.readiness.collectAsState()
+    val live by pathfinder.callState.collectAsState()
+    val starting by pathfinder.starting.collectAsState()
 
     LaunchedEffect(Unit) {
         // The saved list is already on screen. This replaces it when the provider answers.
@@ -715,6 +767,14 @@ private fun HistoryPage(
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Calls", style = MaterialTheme.typography.headlineSmall)
+        // The one fact that decides whether a call can reach this phone, in front of the list
+        // rather than at the bottom of the dialer.
+        Text(
+            dialStatus(readiness, live, starting),
+            style = MaterialTheme.typography.bodySmall,
+            color = if (readiness.failure != null) MaterialTheme.colorScheme.error
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
 
         Section(
             "Recent calls",
@@ -1279,6 +1339,10 @@ private fun SettingsPage(
     onReset: () -> Unit,
 ) {
     val settings = pathfinder.apiSettings
+    // The standing line and the per-number rows both read these.
+    val readiness by pathfinder.readiness.collectAsState()
+    val live by pathfinder.callState.collectAsState()
+    val starting by pathfinder.starting.collectAsState()
     val provision by pathfinder.provision.collectAsState()
     val lines by pathfinder.activeLines.collectAsState()
     val dids by pathfinder.dids.collectAsState()
@@ -1292,7 +1356,119 @@ private fun SettingsPage(
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Settings", style = MaterialTheme.typography.headlineSmall)
+        Text(
+            dialStatus(readiness, live, starting),
+            style = MaterialTheme.typography.bodySmall,
+            color = if (readiness.failure != null) MaterialTheme.colorScheme.error
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
 
+
+        Section(
+            "Numbers",
+            "The numbers this phone answers. Everything else, the server, the transport and " +
+                "the encryption, comes from the account itself.",
+        ) {
+            // Directly under the heading, so the state of the list reads before the list.
+            when {
+                // A cached list is already on screen, so a background refresh is not reason
+                // to cover the section in a progress bar. It shows when there is nothing to
+                // show yet, or when an operation the user started is running.
+                working != null || (fetching && dids.isEmpty()) -> {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    Text(
+                        (working?.let { "${it.step}… " } ?: "Reading your numbers… ") +
+                            "Each step asks the provider for something, so allow up to a minute.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                failed != null -> Text(
+                    failed.reason,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                fetching -> Text(
+                    "Checking your account…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                dids.isNotEmpty() -> Text(
+                    numbersSummary(dids.size, checkedAt, lines.size),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            // Each chosen number's own registration, in the section that already owns the
+            // numbers. A second section under the same name said the same thing twice.
+            val lineStates = lines.map { line ->
+                line.account.lowercase() to line.state.collectAsState().value
+            }.toMap()
+            val agreements by pathfinder.agreement.collectAsState()
+            dids.filter { it.number in selected }.forEach { did ->
+                val line = lines.firstOrNull { it.account.equals(did.routedAccount, true) }
+                val verdict = did.routedAccount?.let { agreements[it.lowercase()] }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        "●",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(agreementColor(verdict)),
+                    )
+                    Text(did.number, style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        agreementLabel(verdict),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Detail(
+                    "line",
+                    lineStanding(
+                        state = did.routedAccount?.let { lineStates[it.lowercase()] },
+                        transport = line?.credentials?.transport.orEmpty(),
+                        host = line?.credentials?.host.orEmpty(),
+                    ),
+                )
+            }
+            NumbersList(pathfinder, selected, enabled = working == null && !fetching) { next ->
+                selected = next
+                pathfinder.selectDids(next)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(
+                    onClick = {
+                        val all = pathfinder.dids.value
+                            .filter { it.routedAccount != null }
+                            .map { it.number }
+                            .toSet()
+                        selected = all
+                        pathfinder.selectDids(all)
+                        pathfinder.answerOnSelected()
+                    },
+                    enabled = working == null && !fetching,
+                ) { Text("Select all") }
+                // The same list, used as the off switch: no numbers means nothing is
+                // registered, and it stays that way across restarts.
+                TextButton(
+                    onClick = {
+                        selected = emptySet()
+                        pathfinder.selectDids(emptySet())
+                        pathfinder.answerOnSelected()
+                    },
+                    enabled = working == null && !fetching,
+                ) { Text("Select none") }
+            }
+            if (selected != saved) {
+                Button(
+                    onClick = { pathfinder.answerOnSelected() },
+                    enabled = working == null && !fetching,
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                ) { Text("Apply changes") }
+            }
+        }
         Section(
             "Account",
             "The API password is the only stored secret, sealed with this device's Keystore.",
@@ -1345,77 +1521,6 @@ private fun SettingsPage(
 
         // The same list as onboarding, so a number can be added or dropped later without a
         // second, slightly different screen to learn.
-        Section(
-            "Numbers",
-            "The numbers this phone answers. Everything else, the server, the transport and " +
-                "the encryption, comes from the account itself.",
-        ) {
-            // Directly under the heading, so the state of the list reads before the list.
-            when {
-                // A cached list is already on screen, so a background refresh is not reason
-                // to cover the section in a progress bar. It shows when there is nothing to
-                // show yet, or when an operation the user started is running.
-                working != null || (fetching && dids.isEmpty()) -> {
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                    Text(
-                        (working?.let { "${it.step}… " } ?: "Reading your numbers… ") +
-                            "Each step asks the provider for something, so allow up to a minute.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                failed != null -> Text(
-                    failed.reason,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-                fetching -> Text(
-                    "Checking your account…",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                dids.isNotEmpty() -> Text(
-                    numbersSummary(dids.size, checkedAt, lines.size),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            NumbersList(pathfinder, selected, enabled = working == null && !fetching) { next ->
-                selected = next
-                pathfinder.selectDids(next)
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(
-                    onClick = {
-                        val all = pathfinder.dids.value
-                            .filter { it.routedAccount != null }
-                            .map { it.number }
-                            .toSet()
-                        selected = all
-                        pathfinder.selectDids(all)
-                        pathfinder.answerOnSelected()
-                    },
-                    enabled = working == null && !fetching,
-                ) { Text("Select all") }
-                // The same list, used as the off switch: no numbers means nothing is
-                // registered, and it stays that way across restarts.
-                TextButton(
-                    onClick = {
-                        selected = emptySet()
-                        pathfinder.selectDids(emptySet())
-                        pathfinder.answerOnSelected()
-                    },
-                    enabled = working == null && !fetching,
-                ) { Text("Select none") }
-            }
-            if (selected != saved) {
-                Button(
-                    onClick = { pathfinder.answerOnSelected() },
-                    enabled = working == null && !fetching,
-                    modifier = Modifier.fillMaxWidth().height(52.dp),
-                ) { Text("Apply changes") }
-            }
-        }
     }
 }
 

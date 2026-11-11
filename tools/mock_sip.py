@@ -283,7 +283,40 @@ def main():
         if method == "ACK":
             continue
 
+        # A response to our own INVITE. Until this existed the mock read the app's answer and
+        # threw it away, so "the caller kept ringing" had no evidence behind it either way.
+        if method.startswith("SIP/2.0"):
+            first_line = data.split(b"\r\n", 1)[0].decode("latin-1")
+            code = first_line.split()[1] if len(first_line.split()) > 1 else "?"
+            log(
+                f"response {code} for CSeq {headers.get('cseq', '?')} at {time.time():.3f}"
+            )
+            if code == "200" and "INVITE" in headers.get("cseq", "").upper():
+                # Remember the tag the app gave itself, so a later BYE can be checked against
+                # the dialog it claims to belong to. A BYE without it is out-of-dialog and a
+                # real provider simply does not answer.
+                registration["app_tag"] = headers.get("to", "").split("tag=")[-1]                    if "tag=" in headers.get("to", "") else ""
+                ack = (
+                    f"ACK {headers.get('contact', 'sip:app@mock')} SIP/2.0\r\n"
+                    f"Via: {headers.get('via', '')}\r\n"
+                    f"From: {headers.get('to', '')}\r\n"
+                    f"To: {headers.get('from', '')}\r\n"
+                    f"Call-ID: {headers.get('call-id', '')}\r\n"
+                    f"CSeq: {headers.get('cseq', '1 INVITE')}\r\n"
+                    "Content-Length: 0\r\n\r\n"
+                ).encode()
+                sock.sendto(ack, source)
+                log("ACK sent back for the answer")
+            continue
+
         if method == "BYE":
+            sent_from = headers.get("from", "")
+            expected = registration.get("app_tag", "")
+            in_dialog = bool(expected) and f"tag={expected}" in sent_from
+            log(
+                "BYE " + ("in-dialog" if in_dialog else f"OUT OF DIALOG (from={sent_from!r}, "
+                                                      f"expected tag={expected})")
+            )
             log(f"BYE -> 200, {media.received} media packet(s) echoed")
             media.stop()
             sock.sendto(answering(headers, 200, "OK"), source)

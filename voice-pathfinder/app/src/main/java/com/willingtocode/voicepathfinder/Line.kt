@@ -19,7 +19,11 @@ import kotlinx.coroutines.withTimeoutOrNull
 internal sealed interface LineState {
     data object Idle : LineState
     data class Preparing(val step: String) : LineState
-    data class Registered(val grantedSeconds: Int) : LineState
+    /**
+     * @param atMillis when the provider granted it, so the screen can say how long is left
+     *   rather than how long there was at the start.
+     */
+    data class Registered(val grantedSeconds: Int, val atMillis: Long = 0L) : LineState
     data class Failed(val reason: String) : LineState
     data object Stopped : LineState
 }
@@ -51,6 +55,9 @@ internal class Line(
     private var keepalive: Job? = null
     private var refresher: Job? = null
     private val pending = ConcurrentHashMap<String, Channel<SipMessage>>()
+
+    /** Chosen to be under the ring delay that used to follow a lost answer. */
+    private val RESEND_MILLIS = 600L
     private var localIp = ""
     private var callId = ""
     private var fromTag = ""
@@ -66,12 +73,12 @@ internal class Line(
                 state.value = LineState.Preparing("opening ${credentials.transport} to ${credentials.host}")
                 open()
                 var granted = register()
-                state.value = LineState.Registered(granted)
+                state.value = LineState.Registered(granted, System.currentTimeMillis())
                 log("$account registered, granted $granted s")
                 while (isActive) {
                     delay(maxOf(MIN_REFRESH_MILLIS, granted * 800L))
                     granted = register()
-                    state.value = LineState.Registered(granted)
+                    state.value = LineState.Registered(granted, System.currentTimeMillis())
                 }
             } catch (fault: Exception) {
                 val reason = fault.message ?: fault.toString()
@@ -265,23 +272,37 @@ internal class Line(
         }
     }
 
-    private suspend fun request(message: SipMessage, timeoutMillis: Long): SipMessage? {
+    /**
+     * Sends a request and waits for its response, resending until the time is up.
+     *
+     * It used to resend only on an unreliable transport, on the assumption that TCP and TLS
+     * cannot lose a message. Measured on 2026-11-10: a `200 OK` and a `BYE` were both written,
+     * logged as sent, and never arrived. A dialog that ends with an unacknowledged BYE leaves
+     * the far end believing the call is still up, so the request is repeated either way.
+     */
+    internal suspend fun request(message: SipMessage, timeoutMillis: Long): SipMessage? {
         val cseqPair = SipMessage.cseqOf(message) ?: throw SipFault("request without CSeq")
         val key = "${cseqPair.first} ${cseqPair.second}"
         val channel = Channel<SipMessage>(Channel.BUFFERED)
         pending[key] = channel
         return try {
-            send(message)
-            var answer = withTimeoutOrNull(timeoutMillis / 2) { channel.receive() }
-            if (answer == null && link?.reliable == false) {
+            var answer: SipMessage? = null
+            val deadline = System.currentTimeMillis() + timeoutMillis
+            while (answer == null && System.currentTimeMillis() < deadline) {
                 send(message)
-                answer = withTimeoutOrNull(timeoutMillis / 2) { channel.receive() }
+                answer = withTimeoutOrNull(RESEND_MILLIS) { channel.receive() }
             }
             answer
         } finally {
             pending.remove(key)
         }
     }
+
+    /** The transport this line is on right now, for a Via that matches the socket. */
+    val transport: String get() = link?.transport ?: credentials.transport
+
+    /** The local SIP port, which is not the RTP port and has been mistaken for it. */
+    val sipLocalPort: Int get() = link?.localPort ?: 0
 
     /** Answers an incoming call on this line, and nothing else. */
     internal fun send(message: SipMessage) {

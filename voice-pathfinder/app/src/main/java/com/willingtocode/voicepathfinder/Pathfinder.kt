@@ -130,6 +130,16 @@ sealed interface ProvisionState {
 internal class SipFault(message: String) : Exception(message)
 
 /**
+ * Adds the dialog's local tag to a header that does not carry one yet.
+ *
+ * An inbound INVITE's To has no tag: the tag is ours to invent when we answer. A BYE that
+ * goes out without it belongs to no dialog, and the provider answers by ignoring it, which is
+ * how a hang-up left the caller holding a call that showed as ended here.
+ */
+internal fun withLocalTag(header: String, tag: String): String =
+    if (header.contains("tag=", ignoreCase = true)) header else "$header;tag=$tag"
+
+/**
  * The whole probe, in one object that outlives the screen.
  *
  * It holds the SIP registration and at most one call. A service would be the right shape
@@ -735,18 +745,34 @@ class Pathfinder(
         val uri = contact.ifBlank { dialog.invite.header("From").orEmpty().substringAfter("<").substringBefore(">") }
         val cseq = SipMessage.cseqOf(dialog.invite)?.first ?: 1
         val address = LocalNetwork.ipv4()?.address ?: "0.0.0.0"
+        // The Via has to name the transport the message leaves on and the port the answer can
+        // come back to. It said UDP over a TLS socket and quoted the RTP port, so the provider
+        // had nowhere to send its 200 OK and dropped the hang-up instead.
         val headers = mutableListOf(
-            "Via" to "SIP/2.0/UDP $address:${dialog.localPort};branch=z9hG4bK${randomHex(10)}",
+            "Via" to "SIP/2.0/${dialog.line.transport} $address:${dialog.line.sipLocalPort};" +
+                "branch=z9hG4bK${randomHex(10)}",
             "Max-Forwards" to "70",
-            // From in our BYE is the identity we answered as, which is the INVITE's To.
-            "From" to dialog.invite.header("To").orEmpty(),
+            // From is the identity we answered as: the INVITE's To, carrying the tag we gave
+            // ourselves in the 200 OK. The INVITE's To has no tag at all, and a BYE without the
+            // local tag belongs to no dialog, which is why every one of five hang-ups went out
+            // and none was answered.
+            "From" to identityWithTag(dialog),
             "To" to dialog.invite.header("From").orEmpty(),
             "Call-ID" to dialog.invite.header("Call-ID").orEmpty(),
             "CSeq" to "${cseq + 1} BYE",
             "User-Agent" to SipMessage.USER_AGENT,
         )
+        // The route set, reversed as the answering side must. Without it a routed dialog's
+        // request never reaches the proxy that is keeping the call up.
+        dialog.invite.allHeaders("Record-Route").asReversed().forEach { route ->
+            headers += "Route" to route
+        }
         return SipMessage.request("BYE", uri.ifBlank { "sip:${dialog.did}@${dialog.line.credentials.host}" }, headers)
     }
+
+    /** The INVITE's To with our local tag, which is what makes a BYE part of the dialog. */
+    private fun identityWithTag(dialog: IncomingDialog): String =
+        withLocalTag(dialog.invite.header("To").orEmpty(), dialog.tag)
 
     /** The caller's number from a `From` header, without its display name. */
     private fun callerOf(from: String): String = numberIn(from)
@@ -768,7 +794,14 @@ class Pathfinder(
             ringTimeout?.cancel()
             ringTimeout = null
             scope.launch {
-                runCatching { inbound.line.send(byeFor(inbound)) }
+                // Waiting for the 200 is the difference between the caller's call ending and
+                // it carrying on until they give up. It is also what makes the log say which
+                // of those happened, instead of a cheerful "hung up" either way.
+                val answer = runCatching { inbound.line.request(byeFor(inbound), 4_000) }
+                    .getOrNull()
+                if (answer == null) {
+                    note("the caller never answered the hang-up, so they may still hold the call")
+                }
                 inbound.media.stop()
                 _call.value = PathState.Ended("hung up")
                 note("hung up the incoming call")
@@ -990,6 +1023,51 @@ class Pathfinder(
         val grantedSeconds: Int = 0,
     )
 
+    /**
+     * What the provider says about a line, which is the only fact on this phone that can
+     * contradict the line's own opinion.
+     */
+    sealed interface Agreement {
+        data object Unknown : Agreement
+        data object Checking : Agreement
+        data class Agrees(val server: String?, val transport: String?) : Agreement
+        data class Disagrees(val why: String) : Agreement
+        data class Unreachable(val why: String) : Agreement
+    }
+
+    private val _agreement = MutableStateFlow<Map<String, Agreement>>(emptyMap())
+    val agreement: StateFlow<Map<String, Agreement>> = _agreement
+
+    /** Five minutes is well inside any grant, and polite to the provider's rate limit. */
+    private val AGREEMENT_INTERVAL_MILLIS = 5 * 60_000L
+
+    /** One check per account per five minutes, because the provider rate limits this call. */
+    private val agreementChecked = mutableMapOf<String, Long>()
+    private val agreementLock = Any()
+
+    private fun checkProviderFor(account: String) {
+        val now = System.currentTimeMillis()
+        synchronized(agreementLock) {
+            val last = agreementChecked[account] ?: 0L
+            if (now - last < AGREEMENT_INTERVAL_MILLIS) return
+            agreementChecked[account] = now
+        }
+        _agreement.update { it + (account.lowercase() to Agreement.Checking) }
+        scope.launch {
+            val verdict = runCatching { api.registrationStatus(account) }.fold(
+                onSuccess = { status ->
+                    if (status.registered) {
+                        Agreement.Agrees(status.serverHostname, status.transport)
+                    } else {
+                        Agreement.Disagrees("the provider has no binding for it")
+                    }
+                },
+                onFailure = { fault -> Agreement.Unreachable(describe(fault)) },
+            )
+            _agreement.update { it + (account.lowercase() to verdict) }
+        }
+    }
+
     private val _readiness = MutableStateFlow(Readiness())
     val readiness: StateFlow<Readiness> = _readiness
 
@@ -1024,6 +1102,9 @@ class Pathfinder(
                 .minOfOrNull { it.grantedSeconds } ?: 0,
         )
         if (all.isNotEmpty()) _starting.value = false
+        // Every line that says it is registered gets a second opinion, cheaply and rarely.
+        all.filter { it.state.value is LineState.Registered }
+            .forEach { checkProviderFor(it.account) }
         val live = all.filter { it.state.value is LineState.Registered }
             .map { it.account.lowercase() }
             .toSet()
