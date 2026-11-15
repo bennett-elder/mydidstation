@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -592,8 +593,13 @@ private fun stateLabel(state: PathState): String = when (state) {
     is PathState.RegistrationFailed -> "Not registered: ${state.reason}"
     is PathState.Dialing -> "Calling ${prettyNumber(state.number)}"
     is PathState.Ringing -> "Ringing"
-    is PathState.Connected ->
+    is PathState.Connected -> if (!state.audio) {
+        // Connected with no media is a call where neither side can hear anything, and saying
+        // so is the difference between a fault and "the far end is silent".
+        "In a call, but the microphone would not start, so there is no audio either way"
+    } else {
         "In a call, ${state.codec}${if (state.encrypted) ", encrypted" else ""}"
+    }
     is PathState.Ended -> "Call ended: ${state.reason}"
     is PathState.Failed -> "Failed: ${state.reason}"
 }
@@ -1299,6 +1305,34 @@ private fun IncomingScreen(
     }
 }
 
+/** Every line the app has kept, newest at the bottom, scrolled there on open. */
+@Composable
+private fun LogDialog(lines: List<String>, onDismiss: () -> Unit) {
+    val scroller = rememberScrollState()
+    LaunchedEffect(lines.size) {
+        // Follow the end, because the interesting line is always the newest one.
+        scroller.scrollTo(scroller.maxValue)
+    }
+    Dialog(onDismissRequest = onDismiss) {
+        Card(modifier = Modifier.fillMaxWidth().fillMaxHeight(0.9f)) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("Log", style = MaterialTheme.typography.titleMedium)
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(scroller)
+                        .padding(vertical = 8.dp),
+                ) {
+                    lines.forEach { line ->
+                        Text(line, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                TextButton(onClick = onDismiss) { Text("Close") }
+            }
+        }
+    }
+}
+
 @Composable
 private fun LoadingDialog(title: String, detail: String) {
     Dialog(
@@ -1508,6 +1542,26 @@ private fun SettingsPage(
                 TextButton(onClick = { Battery.ask(context) }) {
                     Text("Allow it to keep the line up")
                 }
+            }
+        }
+
+        Section(
+            "Log",
+            "What the app has been doing, newest last. The same lines are in logcat under the " +
+                "VoicePathfinder tag, and here without a cable.",
+        ) {
+            val lines by pathfinder.log.collectAsState()
+            var showing by remember { mutableStateOf(false) }
+            Text(
+                lines.lastOrNull() ?: "Nothing logged yet.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            TextButton(onClick = { showing = true }, enabled = lines.isNotEmpty()) {
+                Text("Show the whole log")
+            }
+            if (showing) {
+                LogDialog(lines = lines, onDismiss = { showing = false })
             }
         }
 
