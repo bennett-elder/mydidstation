@@ -272,6 +272,18 @@ class Pathfinder(
     private val _dids = MutableStateFlow<List<Did>>(emptyList())
     val dids: StateFlow<List<Did>> = _dids
 
+    /**
+     * The numbers chosen here, as state.
+     *
+     * The settings object is plain storage and tells nobody when it changes, so a screen that
+     * read it directly kept the selection it was first built with. The call list did exactly
+     * that: a number was unchecked and applied, and its calls stayed in the list, because
+     * nothing had asked the list to look again. This is the same selection in a form that
+     * recomposes.
+     */
+    private val _selectedDids = MutableStateFlow(settings.selectedDids)
+    val selectedDids: StateFlow<Set<String>> = _selectedDids
+
     private val _checkedAt = MutableStateFlow(settings.checkedAt)
     val checkedAt: StateFlow<Long> = _checkedAt
 
@@ -1421,6 +1433,9 @@ class Pathfinder(
     /** Saves the chosen numbers. Nothing else in the app decides which calls it answers. */
     fun selectDids(numbers: Set<String>) {
         settings.selectedDids = numbers
+        // Published as state as well as saved, so the list of calls recomposes instead of
+        // waiting for something else to happen to it.
+        _selectedDids.value = numbers
         note("answering ${numbers.size} number(s)")
     }
 
@@ -1453,6 +1468,12 @@ class Pathfinder(
                 settings.callsCheckedAt = System.currentTimeMillis()
                 _callsCheckedAt.value = settings.callsCheckedAt
                 note("read ${records.size} call record(s) for $shown, asked ${window.from}..${window.to}")
+                // Nothing is dropped without a word. A record that names none of the chosen
+                // numbers is not shown, and this is how that stays visible.
+                val elsewhere = records.count { record ->
+                    !mentionsOurNumber(numbersOf(record), settings.selectedDids)
+                }
+                if (elsewhere > 0) note("$elsewhere record(s) named no chosen number, not shown")
             } catch (fault: Exception) {
                 // The failure is reported over whatever was already known, not instead of it.
                 // The window is part of every message: `no_cdr` is the provider saying it has

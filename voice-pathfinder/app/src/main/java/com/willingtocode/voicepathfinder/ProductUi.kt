@@ -740,25 +740,17 @@ private fun HistoryPage(
     val accountOf = remember(dids, fromDid) {
         fromDid?.let { chosen -> dids.firstOrNull { it.number == chosen }?.routedAccount }
     }
-    // The lines this phone works with, from the numbers chosen here. A call on the account
-    // that never touched one of them is not this phone's history, and offering it invites a
-    // call from a line that is not registered.
-    val selectedNumbers = pathfinder.apiSettings.selectedDids
-    val ourAccounts = remember(dids, selectedNumbers) {
-        dids.filter { it.number in selectedNumbers }
-            .mapNotNull { it.routedAccount?.lowercase() }
-            .toSet()
-    }
+    // The numbers chosen here, and nothing else. A record is this phone's history when it
+    // names one of them. The account a record mentions is not evidence about which line a
+    // call used: an account covers every line under it, and trusting it kept a dropped
+    // line's calls on screen.
+    val selectedNumbers by pathfinder.selectedDids.collectAsState()
     // Rows on this phone at all, before the line filter. Kept apart from [shown] so a line
     // filter that hides everything can say how much it hid instead of claiming there were no
     // calls, which is what made a day of test calls look like an empty history.
-    // A line is a number, so the number decides first: a call taken on the number or placed
-    // from it is this phone's history. The account is the fallback for a record that names
-    // no number we hold, which is how the provider sometimes writes a row.
-    val rows = remember(calls.records, ourAccounts, selectedNumbers) {
+    val rows = remember(calls.records, selectedNumbers) {
         collapseLegs(calls.records).filter { row ->
-            mentionsOurNumber(row.numbers, selectedNumbers) ||
-                row.accounts.any { belongsTo(it, ourAccounts) }
+            mentionsOurNumber(row.numbers, selectedNumbers)
         }
     }
     val shown = remember(rows, accountOf) {
@@ -842,7 +834,7 @@ private fun HistoryPage(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                 )
-                ourAccounts.isEmpty() -> Text(
+                selectedNumbers.isEmpty() -> Text(
                     "No number is set up on this phone yet, so there are no calls to show.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -880,12 +872,17 @@ private fun HistoryPage(
                         // The filter is per line, so the message has to be per line too. Saying
                         // "this phone" there reads as a claim about the whole account.
                         val where = if (accountOf == null) "this phone" else "that line"
+                        val read = collapseLegs(calls.records).size
                         Text(
-                            if (hidden == 0) {
-                                if (calls.window.isBlank()) "No calls on $where."
-                                else "No calls on $where between ${calls.window}."
-                            } else {
-                                "No calls on that line, but $hidden on other lines."
+                            when {
+                                hidden > 0 -> "No calls on that line, but $hidden on other lines."
+                                // Records arrived on numbers that are not chosen here. Saying
+                                // "no calls" would hide the difference between a quiet day and
+                                // a number that was dropped.
+                                accountOf == null ->
+                                    "$read calls read, none on the numbers chosen here."
+                                calls.window.isBlank() -> "No calls on $where."
+                                else -> "No calls on $where between ${calls.window}."
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -955,29 +952,16 @@ internal fun mentionsOurNumber(numbers: Set<String>, ours: Set<String>): Boolean
 /** Digits only. A number written `(555) 123-4567` and `5551234567` is one number. */
 internal fun digitsOf(raw: String): String = raw.filter { it.isDigit() }
 
+/** Every number a record mentions, as digits. Both legs, both fields. */
+internal fun numbersOf(record: CallRecord): Set<String> =
+    listOf(record.destination, callerNumber(record.callerId))
+        .map { digitsOf(it) }
+        .filter { it.isNotEmpty() }
+        .toSet()
+
 /** The same number with and without a North American country code. */
 private fun formsOf(digits: String): Set<String> =
     if (digits.length == 11 && digits.startsWith("1")) setOf(digits, digits.drop(1)) else setOf(digits)
-
-/**
- * Whether a record belongs to a line this phone answers.
- *
- * The provider is not consistent about the `account` field. Some rows carry the account on
- * its own and others the sub-account, and comparing the strings exactly dropped three calls
- * that were plainly in the portal. A record naming an account therefore covers every
- * sub-account under it, and the other way round. The underscore is the boundary, so an
- * account whose digits merely begin like another cannot match by accident.
- */
-internal fun belongsTo(recordAccount: String, ours: Set<String>): Boolean {
-    val told = recordAccount.trim().lowercase()
-    if (told.isEmpty()) return false
-    return ours.any { mine ->
-        val line = mine.trim().lowercase()
-        line.isNotEmpty() && (
-            line == told || line.startsWith(told + "_") || told.startsWith(line + "_")
-            )
-    }
-}
 
 /**
  * Folds the provider's per-leg records into one row per call.
@@ -1018,11 +1002,7 @@ internal fun collapseLegs(records: List<CallRecord>): List<CallRowModel> {
             direction = direction,
             account = shown.account,
             accounts = legs.map { it.account.lowercase() }.filter { it.isNotBlank() }.toSet(),
-            numbers = legs
-                .flatMap { listOf(it.destination, callerNumber(it.callerId)) }
-                .map { digitsOf(it) }
-                .filter { it.isNotEmpty() }
-                .toSet(),
+            numbers = legs.flatMap { numbersOf(it) }.toSet(),
         )
     }
 }
