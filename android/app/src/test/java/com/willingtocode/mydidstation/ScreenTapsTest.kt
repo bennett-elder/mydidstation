@@ -410,7 +410,7 @@ class ScreenTapsTest {
         // addressed in order: that keeps this from depending on how the labels are worded.
         val container = container()
         compose.setContent {
-            MyDidStationTheme { SettingsScreen(container, onDone = {}) }
+            MyDidStationTheme { SettingsScreen(container, onShowNumbers = {}) }
         }
 
         val fields = compose.onAllNodes(hasSetTextAction())

@@ -38,16 +38,22 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.res.colorResource
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -65,7 +71,6 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -360,8 +365,51 @@ fun Root(container: Container, open: Target? = null, onConsumed: () -> Unit = {}
                     }
                 }
 
-                Tab.Settings -> SettingsScreen(container, onDone = { tab = Tab.Texts })
+                Tab.Settings -> SettingsScreen(container, onShowNumbers = { tab = Tab.Texts })
             }
+        }
+    }
+}
+
+/**
+ * The app's own chrome: the icon and the name, the same on every page.
+ *
+ * The section used to be named up here as well as by the selected item at the bottom, and the
+ * app's identity was on one page only. A single line, 48 dp tall, so the content below starts
+ * where the bar ends. The old two-line title did not fit the 64 dp it was given: it overflowed
+ * and the first row of content sat 230 dp from the top of the screen.
+ */
+@Composable
+fun AppTopBar(
+    onBack: (() -> Unit)? = null,
+    actions: @Composable RowScope.() -> Unit = {},
+) {
+    Surface(tonalElevation = 2.dp) {
+        Row(
+            modifier = Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (onBack != null) {
+                TextButton(onClick = onBack) { Text("Back") }
+                Spacer(Modifier.width(4.dp))
+            }
+            Box(
+                modifier = Modifier.size(24.dp).clip(RoundedCornerShape(6.dp))
+                    .background(colorResource(R.color.ic_launcher_background)),
+                contentAlignment = Alignment.Center,
+            ) {
+                // The launcher foreground carries its own safe-zone padding, so it is drawn
+                // larger than the box and clipped back to it.
+                Image(
+                    painter = painterResource(R.mipmap.ic_launcher_foreground),
+                    contentDescription = null,
+                    modifier = Modifier.size(34.dp),
+                )
+            }
+            Spacer(Modifier.width(10.dp))
+            Text("My DID Station", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.weight(1f))
+            actions()
         }
     }
 }
@@ -407,14 +455,11 @@ fun VoicemailScreen(container: Container, onOpen: (String, String) -> Unit) {
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("Voicemail") },
-                actions = {
-                    TextButton(onClick = { scope.launch { refresh() } }, enabled = !busy) {
-                        Text(if (busy) "Checking…" else "Refresh")
-                    }
-                },
-            )
+            AppTopBar {
+                TextButton(onClick = { scope.launch { refresh() } }, enabled = !busy) {
+                    Text(if (busy) "Checking…" else "Refresh")
+                }
+            }
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
@@ -661,20 +706,11 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text(name.ifBlank { "Mailbox $mailbox" })
-                        Text("Mailbox $mailbox", style = MaterialTheme.typography.bodySmall)
-                    }
-                },
-                navigationIcon = { TextButton(onClick = onBack) { Text("Back") } },
-                actions = {
-                    TextButton(onClick = { scope.launch { refresh() } }, enabled = !busy) {
-                        Text(if (busy) "Checking…" else "Refresh")
-                    }
-                },
-            )
+            AppTopBar(onBack = onBack) {
+                TextButton(onClick = { scope.launch { refresh() } }, enabled = !busy) {
+                    Text(if (busy) "Checking…" else "Refresh")
+                }
+            }
         },
         bottomBar = {
             // Only while something is loaded. Skip buttons are here because a long message
@@ -720,6 +756,16 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
+            // Which mailbox this is, now that the bar names the app rather than the page.
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                Text(
+                    name.ifBlank { "Mailbox $mailbox" },
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                if (name.isNotBlank()) {
+                    Text("Mailbox $mailbox", style = MaterialTheme.typography.bodySmall)
+                }
+            }
             status?.let {
                 Text(
                     it,
@@ -1156,21 +1202,7 @@ fun DidListScreen(container: Container, onOpen: (String) -> Unit) {
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text("My DID Station")
-                        Text(
-                            if (home?.customEndpoint == true) {
-                                "Numbers · not the real API"
-                            } else {
-                                "Numbers · VoIP.ms"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                },
-            )
+            AppTopBar()
         },
     ) { padding ->
         PullToRefreshBox(
@@ -1317,10 +1349,7 @@ fun ConversationsScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text(did) },
-                navigationIcon = { TextButton(onClick = onBack) { Text("Back") } },
-            )
+            AppTopBar(onBack = onBack)
         },
         floatingActionButton = {
             // Compose lives here, not in the top-level list: you are always
@@ -1352,6 +1381,14 @@ fun ConversationsScreen(
         ) {
             LazyColumn(Modifier.fillMaxSize()) {
                 item { SyncStatus(container, status) }
+                item {
+                    // The number these conversations belong to, now the bar names the app.
+                    Text(
+                        did,
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    )
+                }
                 if (rows.isEmpty()) {
                     item {
                         Text(
@@ -1661,15 +1698,18 @@ fun MessagesScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = {
-                    Text(if (resolvedContact.isEmpty()) "New message" else resolvedContact)
-                },
-                navigationIcon = { TextButton(onClick = onBack) { Text("Back") } },
-            )
+            AppTopBar(onBack = onBack)
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize().imePadding()) {
+            // Who this thread is with. The bar used to say it, and now says the app.
+            if (resolvedContact.isNotEmpty()) {
+                Text(
+                    resolvedContact,
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+            }
             if (resolvedContact.isEmpty()) {
                 OutlinedTextField(
                     value = to,
@@ -2067,7 +2107,7 @@ private fun Context.hostActivity(): Activity? {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(container: Container, onDone: () -> Unit) {
+fun SettingsScreen(container: Container, onShowNumbers: () -> Unit) {
     val scope = rememberCoroutineScope()
     // Seeded from a snapshot read off the main thread. These six values all come out of the
     // Keystore, so initialising them during composition made the settings screen wait on
@@ -2145,10 +2185,7 @@ fun SettingsScreen(container: Container, onDone: () -> Unit) {
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("Settings") },
-                navigationIcon = { TextButton(onClick = onDone) { Text("Back") } },
-            )
+            AppTopBar()
         },
     ) { padding ->
         Column(
@@ -2222,7 +2259,7 @@ fun SettingsScreen(container: Container, onDone: () -> Unit) {
             status?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
             found?.let { count ->
                 Button(
-                    onClick = onDone,
+                    onClick = onShowNumbers,
                     modifier = Modifier.focusRequester(viewFocus),
                 ) {
                     Text(if (count == 1) "View the number" else "View $count numbers")
