@@ -1210,6 +1210,17 @@ class Pathfinder(
         _activeLines.value.firstOrNull { it.account == account }?.refreshIfDue()
     }
 
+    /** Registers every active line again, because somebody asked it to. */
+    fun reRegisterLines() {
+        val lines = _activeLines.value
+        if (lines.isEmpty()) {
+            note("there is no line up to register again")
+            return
+        }
+        note("registering ${lines.size} line(s) again on request")
+        lines.forEach { it.reRegisterNow() }
+    }
+
     /** What a screen wake calls: every line decides for itself whether it is due. */
     fun refreshDueLines() {
         _activeLines.value.forEach { it.refreshIfDue() }

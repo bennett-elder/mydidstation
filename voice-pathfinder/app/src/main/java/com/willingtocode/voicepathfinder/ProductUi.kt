@@ -1499,6 +1499,13 @@ private fun SettingsPage(
             // A line kept alive by a foreground service does not survive Doze. Saying which
             // state the device is in is the difference between a phone that answers at night
             // and one that quietly stops and blames the provider.
+            // Registering again used to mean deselecting, applying, reselecting and applying,
+            // which is four taps to ask one question the alarm asks every 48 minutes.
+            if (lines.isNotEmpty()) {
+                TextButton(onClick = { pathfinder.reRegisterLines() }) {
+                    Text("Register these numbers again")
+                }
+            }
             if (selected != saved) {
                 Button(
                     onClick = { pathfinder.answerOnSelected() },

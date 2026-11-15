@@ -143,6 +143,31 @@ internal class Line(
         }
     }
 
+    /**
+     * Registers again because somebody asked, not because the grant is running out.
+     *
+     * The same Call-ID and Contact as every other REGISTER on this line, so the provider
+     * replaces the binding instead of adding one. It takes the same lock as the refresher and
+     * the alarm, so it cannot overlap either.
+     */
+    fun reRegisterNow() {
+        if (!::scope.isInitialized || link == null) {
+            log("$account: there is no connection to register on")
+            return
+        }
+        scope.launch {
+            runCatching { registerLock.withLock { register() } }
+                .onSuccess { granted ->
+                    state.value = LineState.Registered(granted, System.currentTimeMillis())
+                    log("$account registered again on request, granted $granted s")
+                    alarms?.schedule(account, refreshAfter(granted))
+                }
+                .onFailure { fault ->
+                    log("$account: the registration on request failed: ${fault.message ?: fault}")
+                }
+        }
+    }
+
     fun stop() {
         refresher?.cancel()
         refresher = null
