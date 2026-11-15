@@ -152,6 +152,7 @@ class VoipMsTest {
         assertEquals("FAILED", records.first().disposition)
         assertEquals(0, records.first().seconds)
         assertTrue(records.first().logs.contains("Channel is unavailable"))
+        assertEquals("1", records.first().id)
 
         val body = server.takeRequest().body.readUtf8()
         assertTrue(body.contains("getCDR"))

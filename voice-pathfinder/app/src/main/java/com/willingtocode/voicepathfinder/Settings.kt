@@ -262,19 +262,6 @@ class PathfinderSettings(
             prefs.edit().putLong(KEY_CHECKED_AT, value).apply()
         }
 
-    /**
-     * The call list from the last successful read, so a history screen draws instantly.
-     *
-     * Same contract as [didCache]: the screen has something to show before the provider
-     * answers, and the read that replaces it happens behind that content rather than in
-     * front of a blank screen.
-     */
-    var callsCache: String
-        get() = prefs.getString(KEY_CALLS_CACHE, "") ?: ""
-        set(value) {
-            prefs.edit().putString(KEY_CALLS_CACHE, value).apply()
-        }
-
     /** When the call list was last read, or 0 for never. */
     var callsCheckedAt: Long
         get() = prefs.getLong(KEY_CALLS_CHECKED_AT, 0L)
@@ -305,7 +292,6 @@ class PathfinderSettings(
         const val KEY_OFFER = "offer_mode"
         const val KEY_DIDS = "selected_dids"
         const val KEY_CHECKED_AT = "checked_at"
-        const val KEY_CALLS_CACHE = "calls_cache"
         const val KEY_CALLS_CHECKED_AT = "calls_checked_at"
         const val KEY_DID_CACHE = "did_cache"
         const val KEY_CONFIRMED = "numbers_confirmed"

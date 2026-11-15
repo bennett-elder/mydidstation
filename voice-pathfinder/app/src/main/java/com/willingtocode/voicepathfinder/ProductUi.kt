@@ -723,6 +723,7 @@ private fun HistoryPage(
     val checkedAt by pathfinder.callsCheckedAt.collectAsState()
     // One read of the view, so its fields can be compared without a delegated getter in the way.
     val callsNow = calls
+    val loadingOlder by pathfinder.loadingOlder.collectAsState()
     // The standing line needs the same three facts the dialer's status uses.
     val readiness by pathfinder.readiness.collectAsState()
     val live by pathfinder.callState.collectAsState()
@@ -777,6 +778,11 @@ private fun HistoryPage(
                 .pointerInput(pullThreshold) {
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
+                        // Where the list was when the finger landed. A fling is still moving
+                        // when the finger lifts, so asking only at the end made the gesture
+                        // depend on whether the scroll had settled: a hand pull worked, a
+                        // quick swipe did not.
+                        val beganAtEnd = !listScroll.canScrollForward
                         var lastY = down.position.y
                         var total = 0f
                         while (true) {
@@ -786,8 +792,11 @@ private fun HistoryPage(
                             total += change.position.y - lastY
                             lastY = change.position.y
                         }
-                        if (total < -pullThreshold && !listScroll.canScrollForward) {
-                            pathfinder.loadCalls()
+                        // Pull down refreshes, and the box around this list shows its own
+                        // indicator for it. Pulling up at the end asks for the days before
+                        // the oldest call held: the gesture the list itself suggests.
+                        if (total < -pullThreshold && (beganAtEnd || !listScroll.canScrollForward)) {
+                            pathfinder.loadOlder()
                         }
                     }
                 }
@@ -806,8 +815,9 @@ private fun HistoryPage(
 
         Section(
             "Recent calls",
-            "Today and yesterday, as the provider recorded them. A call this phone placed " +
-                "appears here once the provider has written it down.",
+            "What the provider recorded for your numbers. A call this phone placed appears " +
+                "once the provider has written it down. Pull down to refresh, and pull up at " +
+                "the end of the list for earlier days.",
         ) {
             // Always present, even before the callable numbers are known. It used to wait for
             // two of them, so the filter appeared seconds after the list it filters, which
@@ -864,6 +874,11 @@ private fun HistoryPage(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    // Every call the store holds for these numbers. The cap that used to be
+                    // here was a guard against building hundreds of rows at once, and it had
+                    // to be admitted on screen to stay honest: "Showing the newest 200 of
+                    // 205" is a limit the person did not ask for. The rows are cheap enough,
+                    // and a lazy list is the proper answer when this screen is rebuilt.
                     for (call in shown) {
                         CallRow(call) { onUseInDialer(call.destination, call.account) }
                     }
@@ -887,11 +902,6 @@ private fun HistoryPage(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        if (hidden > 0) {
-                            TextButton(onClick = { fromDid = null }) {
-                                Text("Show every line")
-                            }
-                        }
                     }
                     if (calls.error != null) {
                         Text(
@@ -904,9 +914,13 @@ private fun HistoryPage(
             }
             // No Reload button: the list refreshes by dragging from either end, which is the
             // gesture people try on a list before they look for a control.
-            if (calls.loading && calls.records.isNotEmpty()) {
+            // Only the request with no indicator of its own gets a line. A refresh arrives by
+            // drag, and the box draws a spinner for it, so saying "Refreshing…" underneath
+            // was the same news twice while the other request went unmentioned.
+            val working = if (loadingOlder) "Loading earlier…" else null
+            working?.let {
                 Text(
-                    "Refreshing…",
+                    it,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

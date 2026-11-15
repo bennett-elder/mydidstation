@@ -107,6 +107,14 @@ data class CallRecord(
     val account: String = "",
     /** Who the provider says was on the far end, for a call we did not place. */
     val callerId: String = "",
+    /**
+     * The provider's `uniqueid` for this leg.
+     *
+     * Without it a record was only ever a description of a call, never the call itself: two
+     * reads could not be reconciled, so the same call could be stored twice and a call that
+     * grew a duration after it ended could not be corrected. This is the key the store uses.
+     */
+    val id: String = "",
 )
 
 /**
@@ -300,6 +308,7 @@ class VoipMs(
                 logs = row.optString("call_logs").trim(),
                 account = row.optString("account").trim(),
                 callerId = row.optString("callerid").trim(),
+                id = row.optString("uniqueid").trim(),
             )
         }
         return out

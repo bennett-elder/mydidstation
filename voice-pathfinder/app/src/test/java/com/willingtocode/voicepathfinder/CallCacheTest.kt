@@ -56,7 +56,8 @@ class CallCacheTest {
     }
 
     private val cdr = """{"status":"success","cdr":[{"date":"2026-11-09 20:14:03","destination":"15551230000",""" +
-        """"disposition":"ANSWERED","description":"","seconds":"21","call_logs":"leg A"}]}"""
+        """"disposition":"ANSWERED","description":"","seconds":"21","uniqueid":"9001",""" +
+        """"call_logs":"leg A"}]}"""
 
     private fun awaitRecords(pathfinder: Pathfinder): List<CallRecord> {
         repeat(100) {
@@ -75,7 +76,7 @@ class CallCacheTest {
         val read = awaitRecords(first)
         assertEquals(1, read.size)
         assertEquals("15551230000", read.first().destination)
-        assertFalse("the read did not reach the disk", settings.callsCache.isBlank())
+        assertTrue("the read did not reach the store", CallStore(app).count() > 0)
         assertTrue("no freshness stamp", first.callsCheckedAt.value > 0L)
 
         val requests = server.requestCount
@@ -83,6 +84,54 @@ class CallCacheTest {
         assertEquals(1, second.calls.value.records.size)
         assertEquals("ANSWERED", second.calls.value.records.first().disposition)
         assertEquals(requests, server.requestCount)
+    }
+
+    @Test
+    fun `reading the same call again does not add a second row`() {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(cdr))
+        val pathfinder = Pathfinder(app, settings)
+        pathfinder.loadCalls()
+        assertEquals(1, awaitRecords(pathfinder).size)
+
+        // The provider answers with the same uniqueid: the same call, read twice.
+        server.enqueue(MockResponse().setResponseCode(200).setBody(cdr))
+        pathfinder.loadCalls()
+        Thread.sleep(1500)
+
+        assertEquals(1, pathfinder.calls.value.records.size)
+        assertEquals(1, CallStore(app).count())
+    }
+
+    @Test
+    fun `load more asks for the days before the oldest call held`() {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(cdr))
+        val pathfinder = Pathfinder(app, settings)
+        pathfinder.loadCalls()
+        assertEquals(1, awaitRecords(pathfinder).size)
+
+        val older = """{"status":"success","cdr":[{"date":"2026-11-05 09:00:00","destination":"15551239999",""" +
+            """"disposition":"ANSWERED","description":"Outbound - Customer","seconds":"9",""" +
+            """"uniqueid":"7001","account":"100000_line","call_logs":""}]}"""
+        server.enqueue(MockResponse().setResponseCode(200).setBody(older))
+        pathfinder.loadOlder()
+        awaitStored(2)
+
+        assertEquals(2, pathfinder.calls.value.records.size)
+        assertEquals("15551239999", pathfinder.calls.value.records.last().destination)
+
+        server.takeRequest()
+        val asked = server.takeRequest().body.readUtf8()
+        // The body is multipart, so each field is on its own line rather than in a query.
+        assertTrue("asked for the wrong days: $asked", asked.contains("getCDR"))
+        assertTrue("asked where it should end: $asked", asked.contains("2026-11-09"))
+        assertTrue("asked where it should begin: $asked", asked.contains("2026-11-02"))
+    }
+
+    private fun awaitStored(count: Int) {
+        repeat(60) {
+            if (CallStore(app).count() >= count) return
+            Thread.sleep(100)
+        }
     }
 
     @Test
@@ -106,7 +155,7 @@ class CallCacheTest {
         val many = (0 until 12).joinToString(",") { i ->
             """{"date":"2026-11-09 1$i:00:00","destination":"1555123000$i",""" +
                 """"disposition":"NO ANSWER","description":"Inbound - Local Caller",""" +
-                """"seconds":"0","account":"100000_in","call_logs":""}"""
+                """"seconds":"0","account":"100000_in","uniqueid":"80$i","call_logs":""}"""
         }
         server.enqueue(MockResponse().setResponseCode(200).setBody("""{"status":"success","cdr":[$many]}"""))
 

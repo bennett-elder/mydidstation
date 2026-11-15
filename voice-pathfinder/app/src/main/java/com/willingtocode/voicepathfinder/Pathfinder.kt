@@ -99,6 +99,31 @@ sealed interface AccountListState {
     data class Failed(val reason: String) : AccountListState
 }
 
+/** How many days one tap of "Load more" reaches back. */
+internal const val OLDER_DAYS = 7
+
+/**
+ * The window to ask for when reaching back past [oldestDate].
+ *
+ * Anchored on the oldest call the store holds, so each tap continues where the last one
+ * stopped instead of re-asking for a fixed period. With nothing stored there is no anchor,
+ * and the window ends the day before yesterday, where the ordinary read begins.
+ */
+internal fun olderWindow(
+    nowMillis: Long,
+    zone: TimeZone,
+    oldestDate: String?,
+    days: Int = OLDER_DAYS,
+): Pair<String, String> {
+    val format = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply { timeZone = zone }
+    val day = 24L * 60 * 60 * 1000
+    val anchor = oldestDate?.take(10)?.takeIf { it.length == 10 }
+    val to = anchor ?: format.format(Date(nowMillis - day))
+    val base = runCatching { format.parse(to) }.getOrNull() ?: Date(nowMillis - day)
+    val from = format.format(Date(base.time - days * day))
+    return from to to
+}
+
 /**
  * The dates asked of the provider, and the dates shown to the person.
  *
@@ -208,6 +233,7 @@ class Pathfinder(
 ) {
 
     private val appContext = context.applicationContext
+    private val callStore by lazy { CallStore(appContext) }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val api = VoipMs(settings, ::note)
     private val random = SecureRandom()
@@ -268,6 +294,9 @@ class Pathfinder(
 
     private val _calls = MutableStateFlow(CallsView())
     val calls: StateFlow<CallsView> = _calls
+
+    private val _loadingOlder = MutableStateFlow(false)
+    val loadingOlder: StateFlow<Boolean> = _loadingOlder
 
     private val _dids = MutableStateFlow<List<Did>>(emptyList())
     val dids: StateFlow<List<Did>> = _dids
@@ -1370,50 +1399,64 @@ class Pathfinder(
         }.onFailure { note("the saved number list could not be read; it will be fetched") }
     }
 
-    /** Reads the call list written by the last successful fetch. */
+    /** Draws the history from the store, so a launch shows it without a request. */
     private fun restoreCalls() {
-        val cached = settings.callsCache
-        if (cached.isBlank()) return
         runCatching {
-            val array = JSONArray(cached)
-            val out = mutableListOf<CallRecord>()
-            for (i in 0 until array.length()) {
-                val row = array.getJSONObject(i)
-                out += CallRecord(
-                    date = row.optString("date"),
-                    destination = row.optString("destination"),
-                    disposition = row.optString("disposition"),
-                    description = row.optString("description"),
-                    seconds = row.optInt("seconds"),
-                    logs = row.optString("logs"),
-                    account = row.optString("account"),
-                    callerId = row.optString("callerId"),
-                )
-            }
-            if (out.isNotEmpty()) {
-                _calls.value = CallsView(records = out)
-                note("${out.size} call record(s) from the saved list")
-            }
-        }.onFailure { note("the saved call list could not be read; it will be fetched") }
+            val stored = callStore.all()
+            if (stored.isEmpty()) return
+            _calls.value = CallsView(records = stored)
+            note("${stored.size} call record(s) from the store")
+        }.onFailure { note("the stored history could not be read; it will be fetched") }
     }
 
-    private fun cacheCalls(list: List<CallRecord>) {
-        val array = JSONArray()
-        for (record in list) {
-            array.put(
-                JSONObject()
-                    .put("date", record.date)
-                    .put("destination", record.destination)
-                    .put("disposition", record.disposition)
-                    .put("description", record.description)
-                    .put("seconds", record.seconds)
-                    .put("logs", record.logs)
-                    .put("account", record.account)
-                    .put("callerId", record.callerId),
+    /**
+     * Asks the provider for the days before the oldest call the store holds.
+     *
+     * The history is otherwise built a day at a time, as each read covers yesterday and
+     * today, so a phone installed this morning would show two days of calls and no way to
+     * see further back. This is that way: one request, merged into the store like any read.
+     */
+    fun loadOlder() {
+        // One provider request at a time: two at once raced each other's answers into the
+        // same list, and the screen had no way to say which was which.
+        if (_loadingOlder.value || _calls.value.loading) return
+        scope.launch {
+            _loadingOlder.value = true
+            val window = olderWindow(
+                nowMillis = System.currentTimeMillis(),
+                zone = TimeZone.getDefault(),
+                oldestDate = callStore.oldestDate(),
             )
+            try {
+                val records = api.callRecords(fromDate = window.first, toDate = window.second)
+                callStore.upsert(records)
+                callStore.pruneBefore(pruneBefore())
+                val stored = callStore.all()
+                _calls.value = _calls.value.copy(records = stored, error = null, note = null)
+                note(
+                    "asked ${window.first}..${window.second}: ${records.size} record(s), " +
+                        "${stored.size} in the store",
+                )
+            } catch (fault: Exception) {
+                // A period with nothing in it is an answer, not a failure.
+                val nothing = providerHeldNothing(fault, "${window.first} to ${window.second}")
+                if (nothing != null) {
+                    _calls.value = _calls.value.copy(loading = false, note = nothing)
+                    note("the provider has no call records for ${window.first}..${window.second}")
+                } else {
+                    val why = describe(fault)
+                    _calls.value = _calls.value.copy(loading = false, error = why)
+                    note("could not read the calls before ${window.second}: $why")
+                }
+            } finally {
+                _loadingOlder.value = false
+            }
         }
-        settings.callsCache = array.toString()
     }
+
+    /** Keeps ninety days. The screen shows far less, and the provider is the archive. */
+    private fun pruneBefore(): String = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        .format(Date(System.currentTimeMillis() - 90L * DAY_MILLIS))
 
     private fun cacheDids(list: List<Did>) {
         val array = JSONArray()
@@ -1448,6 +1491,9 @@ class Pathfinder(
      */
     fun loadCalls() {
         scope.launch {
+            // The other half of the same guard: a read that arrives while earlier days are
+            // still being fetched would replace the list its answer is about to join.
+            if (_loadingOlder.value) return@launch
             // The saved list stays on screen while this runs: a history that blanks itself
             // on every refresh is a screen the user cannot read.
             _calls.value = _calls.value.copy(loading = true, error = null)
@@ -1463,11 +1509,18 @@ class Pathfinder(
                 // Every record the window covers, not the first eight. The cap was a
                 // display limit that read as "there are no more calls", and it hid a
                 // missed call that the log said had been read.
-                _calls.value = CallsView(records = records, window = shown)
-                cacheCalls(records)
+                // Written down first, then read back: the store is the history, and a read is
+                // a merge into it rather than a replacement of it.
+                callStore.upsert(records)
+                callStore.pruneBefore(pruneBefore())
+                val stored = callStore.all()
+                _calls.value = CallsView(records = stored, window = shown)
                 settings.callsCheckedAt = System.currentTimeMillis()
                 _callsCheckedAt.value = settings.callsCheckedAt
-                note("read ${records.size} call record(s) for $shown, asked ${window.from}..${window.to}")
+                note(
+                    "read ${records.size} record(s) for $shown, asked ${window.from}..${window.to}; " +
+                        "${stored.size} in the store",
+                )
                 // Nothing is dropped without a word. A record that names none of the chosen
                 // numbers is not shown, and this is how that stays visible.
                 val elsewhere = records.count { record ->

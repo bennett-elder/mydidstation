@@ -37,6 +37,18 @@ class CallWindowTest {
     }
 
     @Test
+    fun loading_more_reaches_back_from_the_oldest_call_held() {
+        val window = olderWindow(at(2026, 11, 15, 12), utc, "2026-11-09 20:14:03")
+        assertEquals("2026-11-02" to "2026-11-09", window)
+    }
+
+    @Test
+    fun with_nothing_stored_it_asks_for_the_week_before_yesterday() {
+        val window = olderWindow(at(2026, 11, 15, 12), utc, null)
+        assertEquals("2026-11-07" to "2026-11-14", window)
+    }
+
+    @Test
     fun a_month_boundary_does_not_produce_an_impossible_date() {
         val window = callWindow(at(2026, 12, 1, 1), utc, "-5")
         assertEquals("2026-11-30", window.from)
