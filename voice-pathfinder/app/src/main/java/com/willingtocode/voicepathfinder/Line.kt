@@ -13,6 +13,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** What one registered line is doing. */
@@ -45,6 +47,8 @@ internal class Line(
     /** The sub-account this line registers, which is also what a call from it presents. */
     val credentials: SipCredentials,
     private val log: (String) -> Unit,
+    /** The wake that makes a refresh survive Doze. Null in tests, which have no clock. */
+    private val alarms: LineAlarms? = null,
 ) {
 
     val state = MutableStateFlow<LineState>(LineState.Idle)
@@ -59,6 +63,9 @@ internal class Line(
     /** Chosen to be under the ring delay that used to follow a lost answer. */
     private val RESEND_MILLIS = 600L
 
+    /** Eight tenths of the grant, as the existing design asks for. */
+    private fun refreshAfter(granted: Int): Int = maxOf((MIN_REFRESH_MILLIS / 1000).toInt(), (granted * 8) / 10)
+
     /** Long enough that a network flap does not turn into a registration storm. */
     private val RESTART_DELAY_MILLIS = 2_000L
     private var localIp = ""
@@ -66,6 +73,9 @@ internal class Line(
     private var fromTag = ""
     private var cseq = 0
     private val random = SecureRandom()
+
+    /** Serialises registration, because the loop, the alarm and a restart can all ask. */
+    private val registerLock = Mutex()
 
     /** Registers, then keeps the binding alive at 80% of whatever was granted. */
     fun start(scope: CoroutineScope) {
@@ -78,15 +88,17 @@ internal class Line(
                 var granted = register()
                 state.value = LineState.Registered(granted, System.currentTimeMillis())
                 log("$account registered, granted $granted s")
+                alarms?.schedule(account, refreshAfter(granted))
                 while (isActive) {
                     val wait = maxOf(MIN_REFRESH_MILLIS, granted * 800L)
                     // Logged before and after, because a refresh that never happens and one
                     // that happens late are different faults and only the pair tells them apart.
                     log("$account: next refresh in ${wait / 1000} s")
                     delay(wait)
-                    granted = register()
+                    granted = registerLock.withLock { register() }
                     state.value = LineState.Registered(granted, System.currentTimeMillis())
                     log("$account refreshed, granted $granted s")
+                    alarms?.schedule(account, refreshAfter(granted))
                 }
             } catch (fault: Exception) {
                 val reason = fault.message ?: fault.toString()
@@ -94,6 +106,22 @@ internal class Line(
                 log("$account is not registered: $reason")
                 close()
             }
+        }
+    }
+
+    /** Registers again because the alarm said so. A late wake costs one duplicate, not a gap. */
+    fun refreshNow() {
+        if (!::scope.isInitialized || link == null) return
+        scope.launch {
+            runCatching { registerLock.withLock { register() } }
+                .onSuccess { granted ->
+                    state.value = LineState.Registered(granted, System.currentTimeMillis())
+                    log("$account refreshed on the alarm, granted $granted s")
+                    alarms?.schedule(account, refreshAfter(granted))
+                }
+                .onFailure { fault ->
+                    log("$account: the alarm refresh failed: ${fault.message ?: fault}")
+                }
         }
     }
 
@@ -276,6 +304,7 @@ internal class Line(
     }
 
     private fun close() {
+        alarms?.cancel(account)
         receiver?.cancel()
         receiver = null
         keepalive?.cancel()

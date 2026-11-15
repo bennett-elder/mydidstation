@@ -18,6 +18,9 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- The line has to come back on its own after a restart, and survive an idle night. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- A refresh has to fire while the phone is idle, which a coroutine timer cannot do.
+         Exact alarms need a grant; without it the inexact form is used and the log says so. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Android's call stack carries our calls so the system owns audio focus, routing and
          the lock screen. Without it the app is an audio player that happens to be a phone. -->
@@ -60,6 +63,10 @@
                 <action android:name="android.telecom.ConnectionService" />
             </intent-filter>
         </service>
+
+        <receiver
+            android:name=".RefreshReceiver"
+            android:exported="false" />
 
         <receiver
             android:name=".BootReceiver"

@@ -1194,8 +1194,19 @@ class Pathfinder(
         a.host == b.host && a.port == b.port && a.username == b.username &&
             a.password == b.password && a.tls == b.tls
 
+    /** What the alarm receiver calls when a refresh wake arrives. */
+    fun refreshLine(account: String) {
+        _activeLines.value.firstOrNull { it.account == account }?.refreshNow()
+    }
+
     private fun startLine(account: String, subId: String, credentials: SipCredentials): Line {
-        val line = Line(account, subId, credentials) { text -> note(text) }
+        val line = Line(
+            account = account,
+            subId = subId,
+            credentials = credentials,
+            log = { text -> note(text) },
+            alarms = AlarmLineAlarms(appContext) { text -> note(text) },
+        )
         line.onRequest = { message -> onLineRequest(line, message) }
         line.start(scope)
         scope.launch {
