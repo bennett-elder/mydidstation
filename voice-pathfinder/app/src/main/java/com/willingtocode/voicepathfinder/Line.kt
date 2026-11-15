@@ -79,9 +79,14 @@ internal class Line(
                 state.value = LineState.Registered(granted, System.currentTimeMillis())
                 log("$account registered, granted $granted s")
                 while (isActive) {
-                    delay(maxOf(MIN_REFRESH_MILLIS, granted * 800L))
+                    val wait = maxOf(MIN_REFRESH_MILLIS, granted * 800L)
+                    // Logged before and after, because a refresh that never happens and one
+                    // that happens late are different faults and only the pair tells them apart.
+                    log("$account: next refresh in ${wait / 1000} s")
+                    delay(wait)
                     granted = register()
                     state.value = LineState.Registered(granted, System.currentTimeMillis())
+                    log("$account refreshed, granted $granted s")
                 }
             } catch (fault: Exception) {
                 val reason = fault.message ?: fault.toString()
