@@ -129,6 +129,20 @@ internal fun callWindow(nowMillis: Long, zone: TimeZone, offsetLabel: String): C
     )
 }
 
+/**
+ * What to say when the provider holds nothing for the period.
+ *
+ * `no_cdr` is an answer, not a fault. The screen must not translate it into "no calls",
+ * because a person reading that concludes the calls did not happen rather than that the
+ * provider has nothing to show. Null for every other fault, which is a real error.
+ */
+internal fun providerHeldNothing(fault: Exception, window: String): String? =
+    if ((fault as? ApiException)?.status == "no_cdr") {
+        "The provider has no call records for $window."
+    } else {
+        null
+    }
+
 /** What the provider's call records say, once they have been asked for. */
 data class CallsView(
     val loading: Boolean = false,
@@ -136,6 +150,11 @@ data class CallsView(
     val records: List<CallRecord> = emptyList(),
     /** The dates the provider was asked about, so a refusal can say what it was asked. */
     val window: String = "",
+    /**
+     * Something the provider said that is not a fault, such as having no records for the
+     * period. Shown plainly, because "no calls" and "nothing to read" are different claims.
+     */
+    val note: String? = null,
 )
 
 /**
@@ -1440,12 +1459,27 @@ class Pathfinder(
                 // nothing for a period, and which period is the only thing that makes it
                 // actionable rather than mysterious.
                 val why = describe(fault)
-                _calls.value = _calls.value.copy(
-                    loading = false,
-                    error = "$shown: $why",
-                    window = shown,
-                )
-                note("could not read the call records for $shown: $why")
+                // `no_cdr` is not a failure: it is the provider saying it holds nothing for the
+                // period. Reporting it as an error, or worse as "no calls", tells the person
+                // their history is empty when the truth is that it could not be read.
+                val nothing = providerHeldNothing(fault, shown)
+                if (nothing != null) {
+                    _calls.value = _calls.value.copy(
+                        loading = false,
+                        error = null,
+                        records = emptyList(),
+                        window = shown,
+                        note = nothing,
+                    )
+                    note("the provider has no call records for $shown")
+                } else {
+                    _calls.value = _calls.value.copy(
+                        loading = false,
+                        error = "$shown: $why",
+                        window = shown,
+                    )
+                    note("could not read the call records for $shown: $why")
+                }
             }
         }
     }

@@ -721,6 +721,8 @@ private fun HistoryPage(
 ) {
     val calls by pathfinder.calls.collectAsState()
     val checkedAt by pathfinder.callsCheckedAt.collectAsState()
+    // One read of the view, so its fields can be compared without a delegated getter in the way.
+    val callsNow = calls
     // The standing line needs the same three facts the dialer's status uses.
     val readiness by pathfinder.readiness.collectAsState()
     val live by pathfinder.callState.collectAsState()
@@ -849,6 +851,13 @@ private fun HistoryPage(
                     // Never read is not the same as nothing there, and the difference is
                     // the whole reason this screen looked broken while it was starting.
                     "Not read yet.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                // The provider's answer comes before any claim of ours. "Nothing recorded" and
+                // "nothing happened" are different facts and must not read the same.
+                callsNow.records.isEmpty() && callsNow.note != null -> Text(
+                    callsNow.note,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
