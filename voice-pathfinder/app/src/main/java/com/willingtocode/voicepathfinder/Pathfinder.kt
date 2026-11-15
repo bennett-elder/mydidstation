@@ -540,16 +540,22 @@ class Pathfinder(
      * dialer needs the line, which is the DID routed at that sub-account. A number that is
      * callable now is preferred over one that merely exists.
      */
-    fun didForAccount(account: String?): String? {
-        if (account.isNullOrBlank()) return null
-        val matching = _dids.value
-            .filter { it.routedAccount?.equals(account, ignoreCase = true) == true }
-            .map { it.number }
+    /**
+     * The line a history row belongs to.
+     *
+     * By number, because a line is a number and the row carries the ones it touched. Nothing
+     * else is consulted: a row on this screen has already passed the same test the list uses,
+     * so it is certain to name one of these numbers. The account field is not asked at all,
+     * having twice been the thing that got this wrong.
+     */
+    fun didForCall(numbers: Set<String>): String? {
+        val matching = didsForNumbers(_dids.value, numbers)
         if (matching.isEmpty()) return null
-        // Only a number that can present a call. Handing back one that merely exists made the
-        // dialer preselect a line it then could not use, and the engine substituted another.
-        val callable = _callableDids.value.toSet()
-        return matching.firstOrNull { it in callable }
+        val callable = _callableDids.value
+        // An empty list means the provider has not answered yet, which is the state the dialer
+        // opens in on a cold start, not a claim that no line can present a call.
+        if (callable.isEmpty()) return matching.firstOrNull()
+        return matching.firstOrNull { it in callable } ?: matching.firstOrNull()
     }
 
     /** The DIDs a call can be presented from: chosen, and routed at a registered line. */

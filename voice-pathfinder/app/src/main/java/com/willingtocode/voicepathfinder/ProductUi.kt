@@ -242,11 +242,11 @@ internal fun ProductRoot(pathfinder: Pathfinder) {
                     when (page) {
                         Page.Calls -> HistoryPage(
                             pathfinder = pathfinder,
-                            onUseInDialer = { dial, account ->
+                            onUseInDialer = { dial, numbers ->
                                 // Prefill and open the dialer. A tap on history is not consent
                                 // to call, so nothing is dialled here.
                                 dialNumber = dial
-                                dialDid = pathfinder.didForAccount(account)
+                                dialDid = pathfinder.didForCall(numbers)
                                 dialOpen = true
                             },
                         )
@@ -717,7 +717,7 @@ internal fun callBlockedReason(readiness: Pathfinder.Readiness): String? = when 
 @Composable
 private fun HistoryPage(
     pathfinder: Pathfinder,
-    onUseInDialer: (String, String) -> Unit,
+    onUseInDialer: (String, Set<String>) -> Unit,
 ) {
     val calls by pathfinder.calls.collectAsState()
     val checkedAt by pathfinder.callsCheckedAt.collectAsState()
@@ -880,7 +880,7 @@ private fun HistoryPage(
                     // 205" is a limit the person did not ask for. The rows are cheap enough,
                     // and a lazy list is the proper answer when this screen is rebuilt.
                     for (call in shown) {
-                        CallRow(call) { onUseInDialer(call.destination, call.account) }
+                        CallRow(call) { onUseInDialer(call.destination, call.numbers) }
                     }
                     if (shown.isEmpty()) {
                         val hidden = rows.size
@@ -947,6 +947,13 @@ internal data class CallRowModel(
      */
     val numbers: Set<String> = emptySet(),
 )
+
+/** The numbers that are one of [numbers], compared as digits with or without a country code. */
+internal fun didsForNumbers(dids: List<Did>, numbers: Set<String>): List<String> {
+    val told = numbers.flatMap { formsOf(digitsOf(it)) }.toSet()
+    if (told.isEmpty()) return emptyList()
+    return dids.filter { did -> formsOf(digitsOf(did.number)).any { it in told } }.map { it.number }
+}
 
 /**
  * Whether a call was made or taken on one of the numbers this phone answers.
@@ -1108,6 +1115,8 @@ private fun NumberPicker(
     options: List<String?>,
     selected: String?,
     onSelect: (String?) -> Unit,
+    /** What nothing selected is called here. "All numbers" belongs to the history filter. */
+    emptyLabel: String = "All numbers",
 ) {
     var expanded by remember { mutableStateOf(false) }
     ExposedDropdownMenuBox(
@@ -1116,7 +1125,7 @@ private fun NumberPicker(
         modifier = Modifier.fillMaxWidth(),
     ) {
         OutlinedTextField(
-            value = selected?.let(::prettyNumber) ?: "All numbers",
+            value = selected?.let(::prettyNumber) ?: emptyLabel,
             onValueChange = {},
             readOnly = true,
             singleLine = true,
@@ -1129,7 +1138,7 @@ private fun NumberPicker(
         ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             for (option in options) {
                 DropdownMenuItem(
-                    text = { Text(option?.let(::prettyNumber) ?: "All numbers") },
+                    text = { Text(option?.let(::prettyNumber) ?: emptyLabel) },
                     onClick = {
                         onSelect(option)
                         expanded = false
@@ -1322,6 +1331,8 @@ private fun DialDialog(
                         options = fromDids,
                         selected = presenting,
                         onSelect = onFromDid,
+                        // A call leaves from one number, never from all of them.
+                        emptyLabel = "Choose a number",
                     )
                 }
                 if (needsChoice) {

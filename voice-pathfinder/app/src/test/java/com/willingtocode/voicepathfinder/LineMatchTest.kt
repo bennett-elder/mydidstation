@@ -1,5 +1,6 @@
 package com.willingtocode.voicepathfinder
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -43,6 +44,28 @@ class LineMatchTest {
     fun a_call_on_a_number_we_dropped_is_not_ours_even_on_the_same_account() {
         // This is the case that put another line's calls on screen.
         assertFalse(mentionsOurNumber(setOf("5559998888"), setOf("5551234567")))
+    }
+
+    private fun did(number: String) =
+        Did(number = number, description = "", routing = "account:100000_TestLine", voicemail = "", dialtime = 0)
+
+    @Test
+    fun a_row_that_names_our_number_finds_the_line_it_belongs_to() {
+        val dids = listOf(did("5551234567"), did("5557654321"))
+        assertEquals(listOf("5551234567"), didsForNumbers(dids, setOf("5551234567", "5559998888")))
+    }
+
+    @Test
+    fun the_same_number_with_a_country_code_finds_the_line_too() {
+        val dids = listOf(did("5551234567"))
+        assertEquals(listOf("5551234567"), didsForNumbers(dids, setOf("15551234567")))
+    }
+
+    @Test
+    fun a_row_on_another_number_finds_no_line_of_ours() {
+        val dids = listOf(did("5551234567"))
+        assertTrue(didsForNumbers(dids, setOf("5559998888")).isEmpty())
+        assertTrue(didsForNumbers(dids, emptySet()).isEmpty())
     }
 
     @Test
