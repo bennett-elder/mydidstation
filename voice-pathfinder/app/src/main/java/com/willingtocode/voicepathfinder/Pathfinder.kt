@@ -103,6 +103,8 @@ data class CallsView(
     val loading: Boolean = false,
     val error: String? = null,
     val records: List<CallRecord> = emptyList(),
+    /** The dates the provider was asked about, so a refusal can say what it was asked. */
+    val window: String = "",
 )
 
 /**
@@ -1384,9 +1386,12 @@ class Pathfinder(
             // The saved list stays on screen while this runs: a history that blanks itself
             // on every refresh is a screen the user cannot read.
             _calls.value = _calls.value.copy(loading = true, error = null)
+            // Built before the call, because a refusal has to name what was asked for.
+            val format = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+            val now = System.currentTimeMillis()
+            val window = "${format.format(Date(now - DAY_MILLIS))} to " +
+                "${format.format(Date(now))}, UTC${VoipMs.API_TIMEZONE}"
             try {
-                val format = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-                val now = System.currentTimeMillis()
                 val records = api.callRecords(
                     fromDate = format.format(Date(now - DAY_MILLIS)),
                     toDate = format.format(Date(now)),
@@ -1394,11 +1399,11 @@ class Pathfinder(
                 // Every record the window covers, not the first eight. The cap was a
                 // display limit that read as "there are no more calls", and it hid a
                 // missed call that the log said had been read.
-                _calls.value = CallsView(records = records)
+                _calls.value = CallsView(records = records, window = window)
                 cacheCalls(records)
                 settings.callsCheckedAt = System.currentTimeMillis()
                 _callsCheckedAt.value = settings.callsCheckedAt
-                note("read ${records.size} call record(s) from the provider")
+                note("read ${records.size} call record(s) from the provider for $window")
                 // Temporary: the history has to be filterable per number, and the line a
                 // call used has to come from somewhere in this record. This says where.
                 records.firstOrNull { it.description.startsWith("Outbound") }?.let { record ->
@@ -1409,8 +1414,12 @@ class Pathfinder(
                 }
             } catch (fault: Exception) {
                 // The failure is reported over whatever was already known, not instead of it.
-                _calls.value = _calls.value.copy(loading = false, error = describe(fault))
-                note("could not read the call records: ${describe(fault)}")
+                // The window is part of the message: `no_cdr` is the provider saying it has
+                // nothing for a period, and which period is the only thing that makes it
+                // actionable rather than mysterious.
+                val why = describe(fault)
+                _calls.value = _calls.value.copy(loading = false, error = "$window: $why", window = window)
+                note("could not read the call records for $window: $why")
             }
         }
     }

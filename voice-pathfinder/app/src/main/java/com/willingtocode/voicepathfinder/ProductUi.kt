@@ -747,9 +747,13 @@ private fun HistoryPage(
             .mapNotNull { it.routedAccount?.lowercase() }
             .toSet()
     }
-    val shown = remember(calls.records, accountOf, ourAccounts) {
-        val rows = collapseLegs(calls.records)
-            .filter { row -> row.accounts.any { it in ourAccounts } }
+    // Rows on this phone at all, before the line filter. Kept apart from [shown] so a line
+    // filter that hides everything can say how much it hid instead of claiming there were no
+    // calls, which is what made a day of test calls look like an empty history.
+    val rows = remember(calls.records, ourAccounts) {
+        collapseLegs(calls.records).filter { row -> row.accounts.any { it in ourAccounts } }
+    }
+    val shown = remember(rows, accountOf) {
         if (accountOf == null) {
             rows
         } else {
@@ -843,7 +847,7 @@ private fun HistoryPage(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 calls.records.isEmpty() -> Text(
-                    "No calls in the last day.",
+                    if (calls.window.isBlank()) "No calls." else "No calls between ${calls.window}.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -857,11 +861,22 @@ private fun HistoryPage(
                         CallRow(call) { onUseInDialer(call.destination, call.account) }
                     }
                     if (shown.isEmpty()) {
+                        val hidden = rows.size
                         Text(
-                            "No calls on that line in the last day.",
+                            if (hidden == 0) {
+                                if (calls.window.isBlank()) "No calls on this phone."
+                                else "No calls on this phone between ${calls.window}."
+                            } else {
+                                "No calls on that line, but $hidden on other lines."
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        if (hidden > 0) {
+                            TextButton(onClick = { fromDid = null }) {
+                                Text("Show every line")
+                            }
+                        }
                     }
                     if (calls.error != null) {
                         Text(

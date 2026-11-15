@@ -351,7 +351,9 @@ class VoipMs(
         return text == "1" || text == "yes" || text == "true"
     }
 
-    private companion object {
+    // Internal rather than private: the timezone the API reports in is also the timezone the
+    // call list has to name when it says which dates it asked about.
+    internal companion object {
         const val HTTP_TIMEOUT_SECONDS = 90L
         const val CONNECT_TIMEOUT_SECONDS = 15L
         const val READ_TIMEOUT_SECONDS = 60L
