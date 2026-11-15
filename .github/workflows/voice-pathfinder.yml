@@ -177,9 +177,9 @@ jobs:
           notes=$'A build of the standalone voice app, kept usable while its features move into the\nmain app. It is a separate package, so both can be installed at once.\n\nThe tag carries a `voice-` prefix so these releases never collide with the main app.'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "${{ steps.apk.outputs.path }}" --clobber
-            gh release edit "$TAG" --notes "$notes" --latest=false
+            gh release edit "$TAG" --notes "$notes" --prerelease --latest=false
           else
             gh release create "$TAG" "${{ steps.apk.outputs.path }}" \
               --title "Voice Pathfinder ${{ steps.version.outputs.BUILD_NAME }}" \
-              --notes "$notes" --latest=false
+              --notes "$notes" --prerelease --latest=false
           fi
