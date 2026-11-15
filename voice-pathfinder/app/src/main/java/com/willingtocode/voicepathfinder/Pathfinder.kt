@@ -1059,6 +1059,17 @@ class Pathfinder(
         scope.launch {
             val verdict = runCatching { api.registrationStatus(account) }.fold(
                 onSuccess = { status ->
+                    // The verdict, not just the duration. A check whose answer is only visible
+                    // on screen cannot be read from a log after the fact.
+                    note(
+                        "$account: the provider says " + if (status.registered) {
+                            "registered" + listOfNotNull(status.transport, status.serverHostname)
+                                .takeIf { it.isNotEmpty() }
+                                ?.joinToString(", ", " (", ")").orEmpty()
+                        } else {
+                            "nothing is registered for it"
+                        },
+                    )
                     if (status.registered) {
                         Agreement.Agrees(status.serverHostname, status.transport)
                     } else {
