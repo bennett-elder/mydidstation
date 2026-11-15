@@ -14,6 +14,7 @@ import java.security.SecureRandom
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.coroutineContext
@@ -96,6 +97,36 @@ sealed interface AccountListState {
     data object Loading : AccountListState
     data object Loaded : AccountListState
     data class Failed(val reason: String) : AccountListState
+}
+
+/**
+ * The dates asked of the provider, and the dates shown to the person.
+ *
+ * These are deliberately different. `date_to` in `getCDR` takes a date, and a bare date is
+ * read as the start of that day, so asking for today returned nothing that happened today.
+ * The query therefore ends tomorrow, which covers all of today. Tomorrow is a bound, not a
+ * claim, so the window on screen still ends today.
+ */
+internal data class CallWindow(
+    /** First date asked of the provider, a day before the one shown. */
+    val from: String,
+    /** Last date asked of the provider, a day after the one shown, to include today. */
+    val to: String,
+    /** The period the person is told about. */
+    val shown: String,
+)
+
+internal fun callWindow(nowMillis: Long, zone: TimeZone, offsetLabel: String): CallWindow {
+    val day = 24L * 60 * 60 * 1000
+    val format = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply { timeZone = zone }
+    val from = format.format(Date(nowMillis - day))
+    val today = format.format(Date(nowMillis))
+    val to = format.format(Date(nowMillis + day))
+    return CallWindow(
+        from = from,
+        to = to,
+        shown = "$from to $today, UTC$offsetLabel",
+    )
 }
 
 /** What the provider's call records say, once they have been asked for. */
@@ -1387,23 +1418,22 @@ class Pathfinder(
             // on every refresh is a screen the user cannot read.
             _calls.value = _calls.value.copy(loading = true, error = null)
             // Built before the call, because a refusal has to name what was asked for.
-            val format = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-            val now = System.currentTimeMillis()
-            val window = "${format.format(Date(now - DAY_MILLIS))} to " +
-                "${format.format(Date(now))}, UTC${VoipMs.API_TIMEZONE}"
+            val window = callWindow(
+                nowMillis = System.currentTimeMillis(),
+                zone = TimeZone.getDefault(),
+                offsetLabel = VoipMs.API_TIMEZONE,
+            )
+            val shown = window.shown
             try {
-                val records = api.callRecords(
-                    fromDate = format.format(Date(now - DAY_MILLIS)),
-                    toDate = format.format(Date(now)),
-                )
+                val records = api.callRecords(fromDate = window.from, toDate = window.to)
                 // Every record the window covers, not the first eight. The cap was a
                 // display limit that read as "there are no more calls", and it hid a
                 // missed call that the log said had been read.
-                _calls.value = CallsView(records = records, window = window)
+                _calls.value = CallsView(records = records, window = shown)
                 cacheCalls(records)
                 settings.callsCheckedAt = System.currentTimeMillis()
                 _callsCheckedAt.value = settings.callsCheckedAt
-                note("read ${records.size} call record(s) from the provider for $window")
+                note("read ${records.size} call record(s) for $shown, asked ${window.from}..${window.to}")
                 // Temporary: the history has to be filterable per number, and the line a
                 // call used has to come from somewhere in this record. This says where.
                 records.firstOrNull { it.description.startsWith("Outbound") }?.let { record ->
@@ -1414,12 +1444,16 @@ class Pathfinder(
                 }
             } catch (fault: Exception) {
                 // The failure is reported over whatever was already known, not instead of it.
-                // The window is part of the message: `no_cdr` is the provider saying it has
+                // The window is part of every message: `no_cdr` is the provider saying it has
                 // nothing for a period, and which period is the only thing that makes it
                 // actionable rather than mysterious.
                 val why = describe(fault)
-                _calls.value = _calls.value.copy(loading = false, error = "$window: $why", window = window)
-                note("could not read the call records for $window: $why")
+                _calls.value = _calls.value.copy(
+                    loading = false,
+                    error = "$shown: $why",
+                    window = shown,
+                )
+                note("could not read the call records for $shown: $why")
             }
         }
     }
