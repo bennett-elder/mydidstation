@@ -1434,14 +1434,6 @@ class Pathfinder(
                 settings.callsCheckedAt = System.currentTimeMillis()
                 _callsCheckedAt.value = settings.callsCheckedAt
                 note("read ${records.size} call record(s) for $shown, asked ${window.from}..${window.to}")
-                // Temporary: the history has to be filterable per number, and the line a
-                // call used has to come from somewhere in this record. This says where.
-                records.firstOrNull { it.description.startsWith("Outbound") }?.let { record ->
-                    note("cdr-leg ${record.date} ${record.destination} ${record.seconds}s")
-                    for (detail in record.logs.lines().take(12)) {
-                        if (detail.isNotBlank()) note("cdr-log ${detail.trim()}")
-                    }
-                }
             } catch (fault: Exception) {
                 // The failure is reported over whatever was already known, not instead of it.
                 // The window is part of every message: `no_cdr` is the provider saying it has

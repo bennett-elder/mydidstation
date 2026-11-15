@@ -750,8 +750,14 @@ private fun HistoryPage(
     // Rows on this phone at all, before the line filter. Kept apart from [shown] so a line
     // filter that hides everything can say how much it hid instead of claiming there were no
     // calls, which is what made a day of test calls look like an empty history.
-    val rows = remember(calls.records, ourAccounts) {
-        collapseLegs(calls.records).filter { row -> row.accounts.any { it in ourAccounts } }
+    // A line is a number, so the number decides first: a call taken on the number or placed
+    // from it is this phone's history. The account is the fallback for a record that names
+    // no number we hold, which is how the provider sometimes writes a row.
+    val rows = remember(calls.records, ourAccounts, selectedNumbers) {
+        collapseLegs(calls.records).filter { row ->
+            mentionsOurNumber(row.numbers, selectedNumbers) ||
+                row.accounts.any { belongsTo(it, ourAccounts) }
+        }
     }
     val shown = remember(rows, accountOf) {
         if (accountOf == null) {
@@ -912,7 +918,54 @@ internal data class CallRowModel(
     val account: String = "",
     /** Every sub-account named by any leg of this call, for filtering. */
     val accounts: Set<String> = emptySet(),
+    /**
+     * Every number this call mentions, in any leg, as digits. A line is a number, so this is
+     * how a call is placed on one. The account is not a thing the person owns; the number is.
+     */
+    val numbers: Set<String> = emptySet(),
 )
+
+/**
+ * Whether a call was made or taken on one of the numbers this phone answers.
+ *
+ * The record carries the numbers on both legs: the destination is our own number for an
+ * inbound call, and for an outbound one the number presented is in the caller ID. Matching
+ * on those is matching on what the person actually chose, rather than on an account name
+ * that the provider may or may not attach. Digits only, so brackets, spaces and a leading
+ * country code do not decide whether a call is theirs.
+ */
+internal fun mentionsOurNumber(numbers: Set<String>, ours: Set<String>): Boolean {
+    val wanted = ours.flatMap { formsOf(digitsOf(it)) }.filter { it.length >= 7 }.toSet()
+    if (wanted.isEmpty()) return false
+    return numbers.any { number -> formsOf(digitsOf(number)).any { it in wanted } }
+}
+
+/** Digits only. A number written `(555) 123-4567` and `5551234567` is one number. */
+internal fun digitsOf(raw: String): String = raw.filter { it.isDigit() }
+
+/** The same number with and without a North American country code. */
+private fun formsOf(digits: String): Set<String> =
+    if (digits.length == 11 && digits.startsWith("1")) setOf(digits, digits.drop(1)) else setOf(digits)
+
+/**
+ * Whether a record belongs to a line this phone answers.
+ *
+ * The provider is not consistent about the `account` field. Some rows carry the account on
+ * its own and others the sub-account, and comparing the strings exactly dropped three calls
+ * that were plainly in the portal. A record naming an account therefore covers every
+ * sub-account under it, and the other way round. The underscore is the boundary, so an
+ * account whose digits merely begin like another cannot match by accident.
+ */
+internal fun belongsTo(recordAccount: String, ours: Set<String>): Boolean {
+    val told = recordAccount.trim().lowercase()
+    if (told.isEmpty()) return false
+    return ours.any { mine ->
+        val line = mine.trim().lowercase()
+        line.isNotEmpty() && (
+            line == told || line.startsWith(told + "_") || told.startsWith(line + "_")
+            )
+    }
+}
 
 /**
  * Folds the provider's per-leg records into one row per call.
@@ -953,6 +1006,11 @@ internal fun collapseLegs(records: List<CallRecord>): List<CallRowModel> {
             direction = direction,
             account = shown.account,
             accounts = legs.map { it.account.lowercase() }.filter { it.isNotBlank() }.toSet(),
+            numbers = legs
+                .flatMap { listOf(it.destination, callerNumber(it.callerId)) }
+                .map { digitsOf(it) }
+                .filter { it.isNotEmpty() }
+                .toSet(),
         )
     }
 }
