@@ -1196,7 +1196,12 @@ class Pathfinder(
 
     /** What the alarm receiver calls when a refresh wake arrives. */
     fun refreshLine(account: String) {
-        _activeLines.value.firstOrNull { it.account == account }?.refreshNow()
+        _activeLines.value.firstOrNull { it.account == account }?.refreshIfDue()
+    }
+
+    /** What a screen wake calls: every line decides for itself whether it is due. */
+    fun refreshDueLines() {
+        _activeLines.value.forEach { it.refreshIfDue() }
     }
 
     private fun startLine(account: String, subId: String, credentials: SipCredentials): Line {

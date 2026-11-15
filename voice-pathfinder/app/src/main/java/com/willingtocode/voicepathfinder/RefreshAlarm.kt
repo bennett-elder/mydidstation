@@ -84,3 +84,20 @@ internal class RefreshReceiver : BroadcastReceiver() {
         (context.applicationContext as? PathfinderApp)?.pathfinder?.refreshLine(account)
     }
 }
+
+/**
+ * A screen wake is the other chance to notice an expired binding.
+ *
+ * An alarm that Doze defers can leave the line dead until the next maintenance window. The
+ * person picking the phone up is a wake we get for free, so the lines check themselves then,
+ * and only register if the grant is close to running out.
+ */
+internal class WakeReceiver : BroadcastReceiver() {
+
+    override fun onReceive(context: Context, intent: Intent) {
+        when (intent.action) {
+            Intent.ACTION_SCREEN_ON, Intent.ACTION_USER_PRESENT ->
+                (context.applicationContext as? PathfinderApp)?.pathfinder?.refreshDueLines()
+        }
+    }
+}

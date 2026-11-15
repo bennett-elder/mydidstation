@@ -63,6 +63,9 @@ internal class Line(
     /** Chosen to be under the ring delay that used to follow a lost answer. */
     private val RESEND_MILLIS = 600L
 
+    /** Below this much grant left, a wake is worth a registration; above it, it is not. */
+    private val REFRESH_SKIP_MILLIS = 20 * 60_000L
+
     /** Eight tenths of the grant, as the existing design asks for. */
     private fun refreshAfter(granted: Int): Int = maxOf((MIN_REFRESH_MILLIS / 1000).toInt(), (granted * 8) / 10)
 
@@ -109,9 +112,24 @@ internal class Line(
         }
     }
 
-    /** Registers again because the alarm said so. A late wake costs one duplicate, not a gap. */
-    fun refreshNow() {
+    /**
+     * Registers again if the current grant is close enough to matter.
+     *
+     * Called by the alarm and by a screen wake. When there is plenty of grant left it only
+     * re-arms, which keeps a late or repeated wake from spending a REGISTER for nothing.
+     */
+    fun refreshIfDue() {
         if (!::scope.isInitialized || link == null) return
+        val current = state.value as? LineState.Registered
+        if (current != null) {
+            val remaining = current.grantedSeconds * 1000L -
+                (System.currentTimeMillis() - current.atMillis)
+            if (remaining > REFRESH_SKIP_MILLIS) {
+                log("$account: ${remaining / 1000} s of the grant left, so this wake needs no registration")
+                alarms?.schedule(account, ((remaining - REFRESH_SKIP_MILLIS) / 1000).toInt())
+                return
+            }
+        }
         scope.launch {
             runCatching { registerLock.withLock { register() } }
                 .onSuccess { granted ->
