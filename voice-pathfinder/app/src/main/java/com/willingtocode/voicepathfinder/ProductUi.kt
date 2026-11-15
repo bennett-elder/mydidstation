@@ -877,10 +877,13 @@ private fun HistoryPage(
                     }
                     if (shown.isEmpty()) {
                         val hidden = rows.size
+                        // The filter is per line, so the message has to be per line too. Saying
+                        // "this phone" there reads as a claim about the whole account.
+                        val where = if (accountOf == null) "this phone" else "that line"
                         Text(
                             if (hidden == 0) {
-                                if (calls.window.isBlank()) "No calls on this phone."
-                                else "No calls on this phone between ${calls.window}."
+                                if (calls.window.isBlank()) "No calls on $where."
+                                else "No calls on $where between ${calls.window}."
                             } else {
                                 "No calls on that line, but $hidden on other lines."
                             },
