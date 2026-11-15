@@ -126,6 +126,23 @@ internal fun ProductRoot(pathfinder: Pathfinder) {
         }
     }
 
+    // The microphone is asked for here rather than at the first outbound call, because an
+    // incoming call is the first thing that needs it on a fresh install and that path never
+    // reached the request: the phone rang, was answered, and had no audio in either direction.
+    val microphoneForCalls = rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+    ) { }
+    LaunchedEffect(confirmed) {
+        if (confirmed &&
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                hostContext,
+                android.Manifest.permission.RECORD_AUDIO,
+            ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            microphoneForCalls.launch(android.Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
     // The account is loaded from saved credentials without asking, which is the point of
     // having saved them. Onboarding is not a flag, it is the presence of a sealed blob.
     LaunchedEffect(hasCredentials) {
