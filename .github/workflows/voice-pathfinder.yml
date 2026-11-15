@@ -1,0 +1,185 @@
+name: Voice Pathfinder
+
+# A separate workflow and a separate tag prefix, because this is a second package that exists
+# to stay usable while its features move into the main app. It goes away with the module; the
+# releases it made stay reachable by tag.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'voice-pathfinder/**'
+      - '!voice-pathfinder/**/*.md'
+      - '.github/workflows/voice-pathfinder.yml'
+  workflow_dispatch:
+    inputs:
+      create_release:
+        type: boolean
+        description: 'Create or update the GitHub release with the APK'
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build and release the voice APK
+    runs-on: ubuntu-latest
+    concurrency:
+      group: voice-pathfinder-release-build
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so this push can be compared with the one before it: a release
+          # belongs to a version bump, not to every commit.
+          fetch-depth: 0
+
+      - name: Did the version change?
+        id: version_changed
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "tag push: always publishing"
+            exit 0
+          fi
+          before="${{ github.event.before }}"
+          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "no previous commit to compare: treating the version as changed"
+            exit 0
+          fi
+          if git diff --name-only "$before" "$GITHUB_SHA" | grep -qx 'voice-pathfinder/version.properties'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "version.properties changed: publishing"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "version.properties unchanged: building only"
+          fi
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-voice-${{ runner.os }}-${{ hashFiles('voice-pathfinder/gradle/wrapper/gradle-wrapper.properties', 'voice-pathfinder/**/*.gradle.kts') }}
+          restore-keys: |
+            gradle-voice-${{ runner.os }}-
+
+      - name: Cache Robolectric's Android image
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: robolectric-voice-${{ runner.os }}-${{ hashFiles('voice-pathfinder/app/src/test/resources/robolectric.properties') }}
+          restore-keys: |
+            robolectric-voice-${{ runner.os }}-
+
+      # The same script the app uses, with --voice, so there is one scheme and one
+      # place that knows how a version is written down.
+      - name: Read version
+        id: version
+        run: |
+          set -euo pipefail
+          read -r name code < <(scripts/version.sh --voice show)
+          echo "BUILD_NAME=$name" >> "$GITHUB_OUTPUT"
+          echo "BUILD_NUMBER=$code" >> "$GITHUB_OUTPUT"
+          echo "committed version: $name ($code)"
+
+      - name: Decode release keystore
+        id: keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No RELEASE_KEYSTORE_BASE64 secret, so this APK is debug-signed."
+            exit 0
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Run tests
+        working-directory: voice-pathfinder
+        run: ./gradlew :app:testDebugUnitTest --console=plain
+
+      - name: Build APK
+        id: assemble
+        working-directory: voice-pathfinder
+        env:
+          RELEASE_KEYSTORE_PATH: ${{ steps.keystore.outputs.signed == 'true' && format('{0}/release.keystore', runner.temp) || '' }}
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.keystore.outputs.signed }}" = "true" ]; then
+            ./gradlew :app:assembleRelease --console=plain
+            echo "apk=app/build/outputs/apk/release/app-release.apk" >> "$GITHUB_OUTPUT"
+          else
+            ./gradlew :app:assembleDebug --console=plain
+            echo "apk=app/build/outputs/apk/debug/app-debug.apk" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Key material is removed as soon as the signing step has used it.
+      - name: Remove the keystore
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/release.keystore"
+
+      - name: Name the APK and checksum it
+        id: apk
+        run: |
+          set -euo pipefail
+          src="voice-pathfinder/${{ steps.assemble.outputs.apk }}"
+          suffix=""
+          [ "${{ steps.keystore.outputs.signed }}" = "true" ] || suffix="-debugsigned"
+          out="VoicePathfinder-${{ steps.version.outputs.BUILD_NAME }}-${{ steps.version.outputs.BUILD_NUMBER }}${suffix}.apk"
+          cp "$src" "$out"
+          sha=$(sha256sum "$out" | cut -d' ' -f1)
+          size=$(du -h "$out" | cut -f1)
+          echo "path=$out" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Voice Pathfinder ${{ steps.version.outputs.BUILD_NAME }} (${{ steps.version.outputs.BUILD_NUMBER }})"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| APK | \`$out\` ($size) |"
+            echo "| SHA-256 | \`$sha\` |"
+            echo "| Signing | $([ "${{ steps.keystore.outputs.signed }}" = "true" ] && echo 'release key' || echo 'debug key') |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-apk-${{ steps.version.outputs.BUILD_NAME }}-${{ steps.version.outputs.BUILD_NUMBER }}
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+          retention-days: 90
+
+
+      - name: Publish release
+        if: ${{ (github.event_name == 'push' && steps.version_changed.outputs.changed == 'true') || inputs.create_release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: voice-v${{ steps.version.outputs.BUILD_NAME }}
+        run: |
+          set -euo pipefail
+          notes=$'A build of the standalone voice app, kept usable while its features move into the\nmain app. It is a separate package, so both can be installed at once.\n\nThe tag carries a `voice-` prefix so these releases never collide with the main app.'
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${{ steps.apk.outputs.path }}" --clobber
+            gh release edit "$TAG" --notes "$notes" --latest=false
+          else
+            gh release create "$TAG" "${{ steps.apk.outputs.path }}" \
+              --title "Voice Pathfinder ${{ steps.version.outputs.BUILD_NAME }}" \
+              --notes "$notes" --latest=false
+          fi
