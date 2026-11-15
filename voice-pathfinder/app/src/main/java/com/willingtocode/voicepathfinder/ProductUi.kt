@@ -1400,7 +1400,6 @@ private fun SettingsPage(
     val dids by pathfinder.dids.collectAsState()
     val checkedAt by pathfinder.checkedAt.collectAsState()
     var selected by remember { mutableStateOf(settings.selectedDids) }
-    val saved = settings.selectedDids
     val working = provision as? ProvisionState.Working
     val failed = provision as? ProvisionState.Failed
     val fetching by pathfinder.fetching.collectAsState()
@@ -1415,6 +1414,21 @@ private fun SettingsPage(
             else MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
+
+        // Collected before the summary, because the summary now reports when the lines last
+        // renewed and that is what a manual registration moves.
+        val lineStates = lines.map { line ->
+            line.account.lowercase() to line.state.collectAsState().value
+        }.toMap()
+
+        // What this phone is answering right now, which is the thing Apply changes. Comparing
+        // the on-screen selection with the saved one was always false by the time the screen
+        // recomposed, because the checkboxes save as they are tapped, so the button vanished
+        // the moment it was needed. Selecting nothing is a real choice, and it needs to work.
+        val answering = remember(lines, dids) {
+            val accounts = lines.map { it.account.lowercase() }.toSet()
+            dids.filter { it.routedAccount?.lowercase() in accounts }.map { it.number }.toSet()
+        }
 
         Section(
             "Numbers",
@@ -1446,16 +1460,18 @@ private fun SettingsPage(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 dids.isNotEmpty() -> Text(
-                    numbersSummary(dids.size, checkedAt, lines.size),
+                    numbersSummary(
+                        count = dids.size,
+                        checkedAt = checkedAt,
+                        lines = lines.size,
+                        renewedAt = newestRenewal(lineStates.values),
+                    ),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             // Each chosen number's own registration, in the section that already owns the
             // numbers. A second section under the same name said the same thing twice.
-            val lineStates = lines.map { line ->
-                line.account.lowercase() to line.state.collectAsState().value
-            }.toMap()
             val agreements by pathfinder.agreement.collectAsState()
             dids.filter { it.number in selected }.forEach { did ->
                 val line = lines.firstOrNull { it.account.equals(did.routedAccount, true) }
@@ -1522,8 +1538,10 @@ private fun SettingsPage(
                 TextButton(onClick = { pathfinder.reRegisterLines() }) {
                     Text("Register these numbers again")
                 }
+                // The state of each line is above, so the button's effect is visible there:
+                // a line goes to "Registering: on request" and back to registered.
             }
-            if (selected != saved) {
+            if (selected != answering) {
                 Button(
                     onClick = { pathfinder.answerOnSelected() },
                     enabled = working == null && !fetching,
@@ -1645,21 +1663,29 @@ private fun SettingsPage(
 }
 
 /**
- * The state of the list in one line: how many, and how old.
+ * The state of the list in one line: how many, how old, and when the lines last renewed.
  *
- * "Checked" is when the account was last read, which is the only honest answer to whether
- * the list can be trusted. It says nothing about the registration, which has its own line.
+ * Two different times on purpose. "Checked" is when the account was last read, which is what
+ * makes the list trustworthy. "Renewed" is when a registration last succeeded, which is what
+ * makes the phone reachable, and it is the one that moves when somebody registers by hand.
  */
-internal fun numbersSummary(count: Int, checkedAt: Long, lines: Int): String {
+internal fun numbersSummary(
+    count: Int,
+    checkedAt: Long,
+    lines: Int,
+    renewedAt: Long = 0L,
+): String {
     val numbers = if (count == 1) "1 number" else "$count numbers"
     val fresh = if (checkedAt <= 0L) "not read from the account yet" else "checked ${clockLabel(checkedAt)}"
-    val registered = when (lines) {
-        0 -> ""
-        1 -> ". 1 line registered."
-        else -> ". $lines lines registered."
-    }
-    return "$numbers, $fresh$registered"
+    if (lines == 0) return "$numbers, $fresh"
+    val registered = if (lines == 1) "1 line registered" else "$lines lines registered"
+    val renewed = if (renewedAt > 0L) ", renewed ${clockLabel(renewedAt)}" else ""
+    return "$numbers, $fresh. $registered$renewed."
 }
+
+/** The most recent moment any line renewed its registration, or 0 when none has. */
+internal fun newestRenewal(states: Collection<LineState?>): Long =
+    states.filterIsInstance<LineState.Registered>().maxOfOrNull { it.atMillis } ?: 0L
 
 /** The time if it was today, the date as well if it was not. */
 private fun clockLabel(at: Long): String {

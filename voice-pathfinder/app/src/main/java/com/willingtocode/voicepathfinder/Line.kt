@@ -156,6 +156,9 @@ internal class Line(
             return
         }
         scope.launch {
+            // Visible while it happens: a press with no feedback reads as a press that did
+            // nothing, and this one takes as long as a round trip to the provider.
+            state.value = LineState.Preparing("registering on request")
             runCatching { registerLock.withLock { register() } }
                 .onSuccess { granted ->
                     state.value = LineState.Registered(granted, System.currentTimeMillis())
@@ -163,7 +166,9 @@ internal class Line(
                     alarms?.schedule(account, refreshAfter(granted))
                 }
                 .onFailure { fault ->
-                    log("$account: the registration on request failed: ${fault.message ?: fault}")
+                    val why = fault.message ?: fault.toString()
+                    state.value = LineState.Failed(why)
+                    log("$account: the registration on request failed: $why")
                 }
         }
     }

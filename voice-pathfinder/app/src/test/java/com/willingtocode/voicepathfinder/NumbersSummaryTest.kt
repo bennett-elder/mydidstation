@@ -35,6 +35,14 @@ class NumbersSummaryTest {
     }
 
     @Test
+    fun `a renewal time is appended when a line has renewed`() {
+        val text = numbersSummary(count = 5, checkedAt = now, lines = 1, renewedAt = now)
+        // The point of this clause: registering by hand moves a time on the line the person is
+        // already reading, instead of somewhere else on the screen.
+        assertTrue(text, text.endsWith(", renewed ${time(now)}."))
+    }
+
+    @Test
     fun `a list that was never read says so rather than showing a time`() {
         assertEquals(
             "3 numbers, not read from the account yet",
