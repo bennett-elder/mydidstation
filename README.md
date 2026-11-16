@@ -53,7 +53,7 @@ days per tap down to a two-year floor.
   has the bytes, and video, OGG, MIDI, and PDF open externally.
 - **Credentials** in Keystore-backed encrypted preferences. The database is local
   SQLite and is never synced anywhere.
-- **Voicemail**, in a second tab. Every mailbox on the account is listed with its
+- **Voicemail**, in its own tab. Every mailbox on the account is listed with its
   count of new messages, and each recording shows its transcript when the account
   has transcription enabled. Audio plays inline with 5 second seeking, is cached so
   a replay costs nothing, and playing it marks the message listened through the API.
@@ -66,7 +66,7 @@ days per tap down to a two-year floor.
   silenced without silencing texts, and it never fires for the mailbox you are
   looking at. The count comes from the mailbox list, one request for the whole
   account, so a background poll never downloads a recording.
-- **Calls**, on a third tab. A number can be chosen to answer here instead of at the
+- **Calls**, in its own tab. A number can be chosen to answer here instead of at the
   provider, and the dialer places calls from a number you pick. Both directions go
   through Android's own call stack, so the lock screen, earpiece, speaker, Bluetooth
   and Do Not Disturb behave the way they do for a mobile call, and the incoming
