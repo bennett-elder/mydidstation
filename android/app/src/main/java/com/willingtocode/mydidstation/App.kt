@@ -21,6 +21,14 @@ class App : Application() {
         // is idempotent, so app start is the simplest place to guarantee it.
         container.notifier.ensureChannel()
         SyncWorker.schedule(this)
+        // The platform replaces the record for the same handle, so doing this on every start is
+        // how a call can find a registered account even if nobody has opened a screen yet.
+        TelecomBridge.register(this)
+        // Wakes arrive with nothing but a context, so they are pointed at the engine here. The
+        // engine itself stays lazy: a boot or a screen-on only constructs it if there is a
+        // registration to check.
+        VoiceWake.refreshLine = { account -> container.voice.refreshLine(account) }
+        VoiceWake.refreshDueLines = { container.voice.refreshDueLines() }
     }
 }
 
@@ -38,6 +46,15 @@ class Container(
     val settings by lazy { Settings(context, box) }
     val store by lazy { Store(context) }
     val api by lazy { VoipMs(settings) }
+
+    /**
+     * The call side: lines, registration, and one call at a time.
+     *
+     * Lazy for the same reason as everything else here. It opens a database, reads the sealed
+     * credentials and binds a service, and none of that belongs in the first frame of a screen
+     * that only wanted texts.
+     */
+    val voice by lazy { Voice(context, VoiceSettings(context, shared = settings)) }
     val notifier by lazy { notifierOverride ?: AndroidNotifier(context) }
     val sync by lazy { Sync(store, api, notifier) }
 

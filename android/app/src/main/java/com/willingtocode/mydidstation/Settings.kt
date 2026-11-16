@@ -16,6 +16,23 @@ interface ApiSettings {
 }
 
 /**
+ * The part a screen is allowed to write.
+ *
+ * Kept apart from [ApiSettings] so that reading an account and replacing one are different
+ * capabilities: the voice engine only ever needs to read, and only the settings screen ever
+ * writes. It also gives the call side a way to share this app's single sealed blob instead of
+ * keeping a second copy of the same secret.
+ */
+interface WritableApiSettings : ApiSettings {
+    fun saveCredentials(email: String, password: String)
+
+    fun setEndpoint(url: String)
+
+    /** The account's name for the screen. Never the password. */
+    fun email(): String
+}
+
+/**
  * Everything the app remembers, split in two.
  *
  * The API credentials are one sealed blob, read and written through [SecretBox]. Nothing
@@ -27,7 +44,7 @@ interface ApiSettings {
 class Settings(
     private val context: Context,
     private val box: SecretBox = KeystoreBox(),
-) : ApiSettings {
+) : WritableApiSettings {
 
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -45,6 +62,8 @@ class Settings(
     }
 
     /** Both halves or neither: they are one blob, not two independent values. */
+    override fun saveCredentials(email: String, password: String) = save(email, password)
+
     fun save(email: String, password: String) {
         val payload = JSONObject()
             .put(FIELD_EMAIL, email.trim())
@@ -80,7 +99,7 @@ class Settings(
         return null
     }
 
-    fun email(): String {
+    override fun email(): String {
         val sealed = prefs.getString(KEY_CREDENTIALS, null) ?: return ""
         val opened = box.open(PURPOSE, sealed)
         if (opened !is Unsealed.Ok) return ""
@@ -98,7 +117,7 @@ class Settings(
     override fun endpoint(): String =
         prefs.getString(KEY_ENDPOINT, null)?.takeIf { it.isNotBlank() } ?: DEFAULT_ENDPOINT
 
-    fun setEndpoint(url: String) {
+    override fun setEndpoint(url: String) {
         val trimmed = url.trim()
         if (trimmed.isEmpty() || trimmed == DEFAULT_ENDPOINT) {
             prefs.edit().remove(KEY_ENDPOINT).apply()

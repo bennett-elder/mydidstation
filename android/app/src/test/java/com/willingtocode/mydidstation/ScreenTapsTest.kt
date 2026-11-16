@@ -410,7 +410,7 @@ class ScreenTapsTest {
         // addressed in order: that keeps this from depending on how the labels are worded.
         val container = container()
         compose.setContent {
-            MyDidStationTheme { SettingsScreen(container, onShowNumbers = {}) }
+            MyDidStationTheme { SettingsScreen(container, onShowNumbers = {}, onOpenVoice = {}) }
         }
 
         val fields = compose.onAllNodes(hasSetTextAction())
@@ -420,6 +420,23 @@ class ScreenTapsTest {
 
         compose.waitUntil(timeoutMillis = PATIENCE_MS) { container.settings.credentials() != null }
         assertEquals("user@example.com" to "secret", container.settings.credentials())
+    }
+
+    @Test
+    fun `settings names the call account, which is the one texts use`() {
+        // The merge's contract on this page: one account for texts and calls, so the calls
+        // section names the account it is signed in to instead of asking for it again. With
+        // no numbers chosen it says that, rather than claiming a line is answering.
+        val container = configured()
+        compose.setContent {
+            MyDidStationTheme {
+                SettingsScreen(container, onShowNumbers = {}, onOpenVoice = {})
+            }
+        }
+
+        compose.onNodeWithText("Voice calls").assertExists()
+        compose.onNodeWithText("none chosen yet").assertExists()
+        compose.onNodeWithText("Lines and registration").assertExists()
     }
 
     @Test
