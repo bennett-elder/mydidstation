@@ -1,14 +1,16 @@
 # My DID Station
 
-SMS, picture MMS, and voicemail for [VoIP.ms](https://voip.ms), built for people who
-run more than one number.
+SMS, picture MMS, voicemail, and phone calls for [VoIP.ms](https://voip.ms), built for
+people who run more than one number.
 
 > Working, and used daily on a real phone. Sending, threaded history, delivery
 > status, notifications, configurable polling, and MMS photos all work. Photos are
 > fetched with a size cap, identified from their bytes, cached, and shown whole
 > with a tap to open them larger. Voicemail has its own tab: mailboxes, transcripts
 > where your account has them, playback with seeking, and listened state written
-> back to the account. New recordings notify like new texts do. Sending media is
+> back to the account. New recordings notify like new texts do. The phone is also a
+> phone: calls arrive and go out over the account's SIP registration, ring through
+> Android's own call stack, and are answered from the lock screen. Sending media is
 > not built.
 
 Not affiliated with or endorsed by VoIP.ms. This is a third-party client that
@@ -51,7 +53,7 @@ days per tap down to a two-year floor.
   has the bytes, and video, OGG, MIDI, and PDF open externally.
 - **Credentials** in Keystore-backed encrypted preferences. The database is local
   SQLite and is never synced anywhere.
-- **Voicemail**, in a second tab. Every mailbox on the account is listed with its
+- **Voicemail**, in its own tab. Every mailbox on the account is listed with its
   count of new messages, and each recording shows its transcript when the account
   has transcription enabled. Audio plays inline with 5 second seeking, is cached so
   a replay costs nothing, and playing it marks the message listened through the API.
@@ -64,6 +66,14 @@ days per tap down to a two-year floor.
   silenced without silencing texts, and it never fires for the mailbox you are
   looking at. The count comes from the mailbox list, one request for the whole
   account, so a background poll never downloads a recording.
+- **Calls**, in its own tab. A number can be chosen to answer here instead of at the
+  provider, and the dialer places calls from a number you pick. Both directions go
+  through Android's own call stack, so the lock screen, earpiece, speaker, Bluetooth
+  and Do Not Disturb behave the way they do for a mobile call, and the incoming
+  screen is the app's own, over the keyguard. A foreground service keeps the SIP
+  registration alive with the app closed, and both a reboot and an app update put it
+  back without opening anything. Calls are over the account's SIP registration, not
+  the cellular radio.
 
 ## What it does not do yet
 
@@ -125,7 +135,7 @@ Every push builds a signed APK and publishes it as a prerelease.
 
 The version lives in `android/version.properties`, which is committed. Nothing
 computes a version during a build, so a commit always produces the same numbers:
-`0.11.152032` / `11152032` at the time of writing, meaning months since December
+`0.11.160411` / `11160411` at the time of writing, meaning months since December
 2025, then day and time. `scripts/version.sh write` rewrites that file from the
 clock and refuses to run under CI, so the file only ever changes when a person
 commits it.
@@ -146,6 +156,11 @@ per number per tick, over a window with a fixed overlap so nothing is missed at
 the boundary. Push is optional and would only improve latency. Credentials live
 in Keystore-backed encrypted preferences. The database is local SQLite and is
 never synced anywhere.
+
+Calling does not change that. The phone registers as a SIP handset with the
+provider so calls can arrive, which is a second connection to the same account,
+not a push service and not a relay; texts, calls, and voicemail are all read from
+the same API.
 
 ## License
 

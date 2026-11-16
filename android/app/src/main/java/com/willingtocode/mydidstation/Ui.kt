@@ -50,6 +50,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -227,6 +228,7 @@ sealed interface Screen {
 /** The app's top-level places. Each keeps its own stack, so Back stays inside a tab. */
 enum class Tab(val label: String) {
     Texts("Texts"),
+    Calls("Calls"),
     Voicemail("Voicemail"),
     Settings("Settings"),
 }
@@ -268,6 +270,10 @@ fun Root(container: Container, open: Target? = null, onConsumed: () -> Unit = {}
             },
         )
     }
+    // Whether the Calls tab is showing the line settings rather than the history. Held here
+    // because the app's own Settings page has a button that opens it, and a tab that owned
+    // the flag would have to be told to switch before it could show the right page.
+    var callsLines by remember { mutableStateOf(false) }
     // The thread lives in the Texts stack, so the tab has to be selected as well or it
     // would open behind whichever tab was showing.
     LaunchedEffect(open) {
@@ -283,91 +289,132 @@ fun Root(container: Container, open: Target? = null, onConsumed: () -> Unit = {}
         }
     }
 
-    Scaffold(
-        bottomBar = {
-            NavigationBar {
-                NavigationBarItem(
-                    selected = tab == Tab.Texts,
-                    onClick = { tab = Tab.Texts },
-                    icon = { Icon(Icons.Filled.Email, contentDescription = null) },
-                    label = { Text(Tab.Texts.label) },
-                )
-                NavigationBarItem(
-                    selected = tab == Tab.Voicemail,
-                    onClick = { tab = Tab.Voicemail },
-                    icon = { Icon(Icons.Filled.Phone, contentDescription = null) },
-                    label = { Text(Tab.Voicemail.label) },
-                )
-                NavigationBarItem(
-                    selected = tab == Tab.Settings,
-                    onClick = { tab = Tab.Settings },
-                    icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
-                    label = { Text(Tab.Settings.label) },
-                )
-            }
-        },
-    ) { padding ->
-        Box(Modifier.padding(padding)) {
-            when (tab) {
-                Tab.Texts -> when (val current = screen) {
-                    Screen.Dids -> {
-                        BackHandler(enabled = false) {}
-                        DidListScreen(
-                            container = container,
-                            onOpen = { screen = Screen.Convs(it) },
-                        )
-                    }
+    // Lines come up on launch when calls are set up, so a call can arrive without anyone
+    // having opened the Calls tab first. Nothing starts before numbers were chosen: an
+    // account that only sends texts should not read the SIP side or ask for a microphone.
+    var voiceReady by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        val configured = withContext(Dispatchers.IO) {
+            val settings = container.voice.apiSettings
+            settings.credentials() != null && settings.numbersConfirmed
+        }
+        voiceReady = configured
+        if (configured) container.voice.startUp()
+    }
+    // The microphone is asked for as soon as a call can arrive, not at the first outbound
+    // call: an incoming call on a fresh install is the path that never reaches a screen
+    // which would ask, and it arrived with no audio in either direction.
+    MicrophonePermission(enabled = voiceReady)
 
-                    is Screen.Convs -> {
-                        BackHandler { screen = Screen.Dids }
-                        ConversationsScreen(
-                            container = container,
-                            did = current.did,
-                            onBack = { screen = Screen.Dids },
-                            onOpen = { convId, contact ->
-                                screen = Screen.Msgs(current.did, convId, contact)
-                            },
-                            onNew = { screen = Screen.Msgs(current.did, 0L, "") },
-                        )
-                    }
+    Box {
+        Scaffold(
+            bottomBar = {
+                NavigationBar {
+                    NavigationBarItem(
+                        selected = tab == Tab.Texts,
+                        onClick = { tab = Tab.Texts },
+                        icon = { Icon(Icons.Filled.Email, contentDescription = null) },
+                        label = { Text(Tab.Texts.label) },
+                    )
+                    NavigationBarItem(
+                        selected = tab == Tab.Calls,
+                        onClick = { tab = Tab.Calls },
+                        icon = { Icon(painterResource(R.drawable.ic_dialpad), contentDescription = null) },
+                        label = { Text(Tab.Calls.label) },
+                    )
+                    NavigationBarItem(
+                        selected = tab == Tab.Voicemail,
+                        onClick = { tab = Tab.Voicemail },
+                        icon = { Icon(Icons.Filled.Phone, contentDescription = null) },
+                        label = { Text(Tab.Voicemail.label) },
+                    )
+                    NavigationBarItem(
+                        selected = tab == Tab.Settings,
+                        onClick = { tab = Tab.Settings },
+                        icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
+                        label = { Text(Tab.Settings.label) },
+                    )
+                }
+            },
+        ) { padding ->
+            Box(Modifier.padding(padding)) {
+                when (tab) {
+                    Tab.Texts -> when (val current = screen) {
+                        Screen.Dids -> {
+                            BackHandler(enabled = false) {}
+                            DidListScreen(
+                                container = container,
+                                onOpen = { screen = Screen.Convs(it) },
+                            )
+                        }
 
-                    is Screen.Msgs -> {
-                        // Keyed, because a notification tap can go from one thread straight
-                        // to another, and the screen would otherwise keep the previous
-                        // conversation's remembered state and show the wrong messages.
-                        key(current.did, current.convId, current.contact) {
-                            BackHandler { screen = Screen.Convs(current.did) }
-                            MessagesScreen(
+                        is Screen.Convs -> {
+                            BackHandler { screen = Screen.Dids }
+                            ConversationsScreen(
                                 container = container,
                                 did = current.did,
-                                conversationId = current.convId,
-                                contact = current.contact,
-                                onBack = { screen = Screen.Convs(current.did) },
+                                onBack = { screen = Screen.Dids },
+                                onOpen = { convId, contact ->
+                                    screen = Screen.Msgs(current.did, convId, contact)
+                                },
+                                onNew = { screen = Screen.Msgs(current.did, 0L, "") },
+                            )
+                        }
+
+                        is Screen.Msgs -> {
+                            // Keyed, because a notification tap can go from one thread straight
+                            // to another, and the screen would otherwise keep the previous
+                            // conversation's remembered state and show the wrong messages.
+                            key(current.did, current.convId, current.contact) {
+                                BackHandler { screen = Screen.Convs(current.did) }
+                                MessagesScreen(
+                                    container = container,
+                                    did = current.did,
+                                    conversationId = current.convId,
+                                    contact = current.contact,
+                                    onBack = { screen = Screen.Convs(current.did) },
+                                )
+                            }
+                        }
+                    }
+
+                    Tab.Voicemail -> when (val current = vm) {
+                        VmScreen.Mailboxes -> VoicemailScreen(
+                            container = container,
+                            onOpen = { mailbox, name -> vm = VmScreen.Messages(mailbox, name) },
+                        )
+
+                        is VmScreen.Messages -> {
+                            BackHandler { vm = VmScreen.Mailboxes }
+                            MailboxScreen(
+                                container = container,
+                                mailbox = current.mailbox,
+                                name = current.name,
+                                onBack = { vm = VmScreen.Mailboxes },
                             )
                         }
                     }
-                }
 
-                Tab.Voicemail -> when (val current = vm) {
-                    VmScreen.Mailboxes -> VoicemailScreen(
-                        container = container,
-                        onOpen = { mailbox, name -> vm = VmScreen.Messages(mailbox, name) },
+                    Tab.Calls -> VoiceCallsTab(
+                        voice = container.voice,
+                        showLines = callsLines,
+                        onShowLines = { callsLines = it },
                     )
 
-                    is VmScreen.Messages -> {
-                        BackHandler { vm = VmScreen.Mailboxes }
-                        MailboxScreen(
-                            container = container,
-                            mailbox = current.mailbox,
-                            name = current.name,
-                            onBack = { vm = VmScreen.Mailboxes },
-                        )
-                    }
+                    Tab.Settings -> SettingsScreen(
+                        container = container,
+                        onShowNumbers = { tab = Tab.Texts },
+                        onOpenVoice = {
+                            callsLines = true
+                            tab = Tab.Calls
+                        },
+                    )
                 }
-
-                Tab.Settings -> SettingsScreen(container, onShowNumbers = { tab = Tab.Texts })
             }
         }
+        // Above the tabs, because a call is above everything: a call screen inside one tab
+        // would sit under a navigation bar it cannot hang up.
+        VoiceCallOverlay(container.voice)
     }
 }
 
@@ -453,7 +500,7 @@ fun VoicemailScreen(container: Container, onOpen: (String, String) -> Unit) {
         refresh()
     }
 
-    Scaffold(
+    Scaffold(contentWindowInsets = WindowInsets(0),
         topBar = {
             AppTopBar {
                 TextButton(onClick = { scope.launch { refresh() } }, enabled = !busy) {
@@ -704,7 +751,7 @@ fun MailboxScreen(container: Container, mailbox: String, name: String, onBack: (
         refresh()
     }
 
-    Scaffold(
+    Scaffold(contentWindowInsets = WindowInsets(0),
         topBar = {
             AppTopBar(onBack = onBack) {
                 TextButton(onClick = { scope.launch { refresh() } }, enabled = !busy) {
@@ -1200,7 +1247,7 @@ fun DidListScreen(container: Container, onOpen: (String) -> Unit) {
         permission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
-    Scaffold(
+    Scaffold(contentWindowInsets = WindowInsets(0),
         topBar = {
             AppTopBar()
         },
@@ -1347,7 +1394,7 @@ fun ConversationsScreen(
         }
     }
 
-    Scaffold(
+    Scaffold(contentWindowInsets = WindowInsets(0),
         topBar = {
             AppTopBar(onBack = onBack)
         },
@@ -1696,7 +1743,7 @@ fun MessagesScreen(
         }
     }
 
-    Scaffold(
+    Scaffold(contentWindowInsets = WindowInsets(0),
         topBar = {
             AppTopBar(onBack = onBack)
         },
@@ -2107,7 +2154,11 @@ private fun Context.hostActivity(): Activity? {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(container: Container, onShowNumbers: () -> Unit) {
+fun SettingsScreen(
+    container: Container,
+    onShowNumbers: () -> Unit,
+    onOpenVoice: () -> Unit,
+) {
     val scope = rememberCoroutineScope()
     // Seeded from a snapshot read off the main thread. These six values all come out of the
     // Keystore, so initialising them during composition made the settings screen wait on
@@ -2121,6 +2172,8 @@ fun SettingsScreen(container: Container, onShowNumbers: () -> Unit) {
     var status by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var found by remember { mutableStateOf<Int?>(null) }
+    // Bumped when a save makes the account name in the voice section stale.
+    var voiceRevision by remember { mutableStateOf(0) }
     val viewFocus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
     val context = LocalContext.current
@@ -2183,7 +2236,7 @@ fun SettingsScreen(container: Container, onShowNumbers: () -> Unit) {
     // also drops it from the credential fields, and the keyboard closes.
     LaunchedEffect(found) { if (found != null) viewFocus.requestFocus() }
 
-    Scaffold(
+    Scaffold(contentWindowInsets = WindowInsets(0),
         topBar = {
             AppTopBar()
         },
@@ -2242,9 +2295,18 @@ fun SettingsScreen(container: Container, onShowNumbers: () -> Unit) {
                             // Keystore, so this shares the try with the network call.
                             withContext(Dispatchers.IO) {
                                 container.settings.save(email, password)
+                                // The call side reads the same account. When numbers were
+                                // already chosen for calls, saving the credentials is what
+                                // brings the lines back without opening the Calls tab.
+                                if (container.voice.apiSettings.numbersConfirmed) {
+                                    container.voice.startUp()
+                                }
                             }
                             val count = container.sync.discoverDids()
                             found = count
+                            // The voice section read the account name once. A new account
+                            // is exactly when that read is stale.
+                            voiceRevision++
                             status = if (count == 1) "Found 1 number." else "Found $count numbers."
                             keyboard?.hide()
                         } catch (e: Exception) {
@@ -2400,6 +2462,16 @@ fun SettingsScreen(container: Container, onShowNumbers: () -> Unit) {
                     )
                     TextButton(onClick = { askToNotify() }) { Text("Allow") }
                 }
+            }
+
+            // Calls last, because they are the newest thing the account does and the
+            // sections above are what someone came to this page for. The status is the
+            // same one the Calls tab shows, so the two pages cannot disagree.
+            HorizontalDivider()
+            // Keyed so saving a new account recomposes the section instead of leaving it
+            // with the previous account's name until the tab is reopened.
+            key(voiceRevision) {
+                VoiceSection(container, onOpenVoice)
             }
         }
     }

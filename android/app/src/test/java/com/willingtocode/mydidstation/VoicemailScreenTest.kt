@@ -2,10 +2,13 @@ package com.willingtocode.mydidstation
 
 import android.app.Application
 import android.content.Context
+import androidx.compose.ui.test.ComposeTimeoutException
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.printToString
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -112,9 +115,18 @@ class VoicemailScreenTest {
 
     private fun waitForRow(text: String) {
         // The rows arrive from a coroutine that goes out to the API, so the row has to be
-        // waited for rather than assumed.
-        compose.waitUntil(timeoutMillis = PATIENCE_MS) {
-            compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty()
+        // waited for rather than assumed. When it never arrives, the failure carries the screen
+        // and the methods the app asked for: a bare timeout said nothing about whether the
+        // request was made, refused, or answered and ignored.
+        try {
+            compose.waitUntil(timeoutMillis = PATIENCE_MS) {
+                compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty()
+            }
+        } catch (timeout: ComposeTimeoutException) {
+            throw AssertionError(
+                "never saw '$text'. API asked: $asked\n" + compose.onRoot().printToString(),
+                timeout,
+            )
         }
     }
 
