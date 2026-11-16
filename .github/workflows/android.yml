@@ -105,8 +105,12 @@ jobs:
         id: version
         run: |
           set -euo pipefail
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            scripts/version.sh check-tag "${GITHUB_REF_NAME}"
+          # A tag is a release by definition. A push to main is the other release path:
+          # branches publish prereleases, and a version bump on main publishes the real one.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] || [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+              scripts/version.sh check-tag "${GITHUB_REF_NAME}"
+            fi
             echo "PRERELEASE=false" >> "$GITHUB_OUTPUT"
           else
             echo "PRERELEASE=true" >> "$GITHUB_OUTPUT"
@@ -206,6 +210,14 @@ jobs:
           SIGNED: ${{ steps.keystore.outputs.signed }}
         run: |
           set -euo pipefail
+          # A merge can carry a version its branch already published, which is what happened
+          # when run 50 released 0.11.160411 and the merge tried to publish it again: the
+          # build was fine and `gh release create` failed on the existing tag. A green build
+          # that publishes nothing is the honest outcome.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "$TAG is already released; building only"
+            exit 0
+          fi
           if [ "$SIGNED" = "true" ]; then signing="the release key"; else signing="the debug key"; fi
           cat > "$RUNNER_TEMP/notes.md" <<NOTES
           My DID Station $NAME.
