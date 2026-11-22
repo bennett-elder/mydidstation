@@ -16,10 +16,13 @@ on:
       - '.github/workflows/android.yml'
   workflow_dispatch:
     inputs:
+      # Off by default: a manual run is usually a branch build to test with, and publishing it
+      # releases that version early, which makes the merge that follows skip its own version as
+      # already released. Turn it on deliberately when a manual run is meant to be the release.
       create_release:
         type: boolean
         description: 'Create or update the GitHub release with the APK'
-        default: true
+        default: false
 
 permissions:
   contents: write
