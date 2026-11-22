@@ -111,6 +111,21 @@ class VoicemailScreenTest {
     private fun configured(): Container = container().apply {
         settings.save("user@example.com", "secret")
         settings.setEndpoint(server.url("/rest.php").toString())
+        // The rows these tests tap are seeded, because both screens show what the store holds
+        // before they refresh, and the tap wiring is the subject. Waiting for the API made the
+        // wait time out on a loaded runner: it failed 1 of 420 in CI on 2026-11-22 and three
+        // times in five local runs before that, always on the row wait and never alone.
+        store.putMailbox("1001", "Front desk", 2, 0, true)
+        store.putVoicemail(
+            mailbox = "1001",
+            messageNum = 3,
+            folder = "INBOX",
+            date = "2026-11-08 10:00:00",
+            callerId = "5559990009",
+            duration = "0:12",
+            urgent = false,
+            listened = false,
+        )
     }
 
     private fun waitForRow(text: String) {
@@ -123,10 +138,11 @@ class VoicemailScreenTest {
                 compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty()
             }
         } catch (timeout: ComposeTimeoutException) {
-            throw AssertionError(
-                "never saw '$text'. API asked: $asked\n" + compose.onRoot().printToString(),
-                timeout,
-            )
+            val detail = "never saw '$text'. API asked: $asked\n" + compose.onRoot().printToString()
+            // Printed as well as thrown: Gradle's console summary keeps only the exception type
+            // and line, so a CI failure otherwise says nothing about what the screen showed.
+            println(detail)
+            throw AssertionError(detail, timeout)
         }
     }
 
